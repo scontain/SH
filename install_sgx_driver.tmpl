@@ -1,0 +1,253 @@
+#!/bin/bash
+: '
+Access to this file is granted under the SCONE COMMERCIAL LICENSE V1.0 
+
+Any use of this product using this file requires a commercial license from scontain UG, www.scontain.com.
+
+Permission is also granted  to use the Program for a reasonably limited period of time  (but no longer than 1 month) 
+for the purpose of evaluating its usefulness for a particular purpose.
+
+THERE IS NO WARRANTY FOR THIS PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN OTHERWISE STATED IN WRITING 
+THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, 
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. 
+
+THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM PROVE DEFECTIVE, 
+YOU ASSUME THE COST OF ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
+
+IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED ON IN WRITING WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MAY
+MODIFY AND/OR REDISTRIBUTE THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL, 
+INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM INCLUDING BUT NOT LIMITED TO LOSS 
+OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE 
+WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+Copyright (C) 2017-2018 scontain.com
+'
+
+#
+# - install patched sgx driver 
+
+
+set -e
+
+page0_patch_content=$(cat << 'PAGE0_PATCH_EOF'
+${PAGE0_PATCH_CONTENT}
+PAGE0_PATCH_EOF
+)
+
+metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
+${METRICS_PATCH_CONTENT}
+METRICS_PATCH_EOF
+)
+
+# print the right color for each level
+#
+# Arguments:
+# 1:  level
+
+function msg_color {
+    priority=$1
+    if [[ $priority == "fatal" ]] ; then
+        echo -e "\033[31m"
+    elif [[ $priority == "error" ]] ; then
+        echo -e "\033[34m"
+    elif [[ $priority == "warning" ]] ; then
+        echo -e "\033[35m"
+    elif [[ $priority == "info" ]] ; then
+        echo -e "\033[36m"
+    elif [[ $priority == "debug" ]] ; then
+        echo -e "\033[37m"
+    elif [[ $priority == "default" ]] ; then
+        echo -e "\033[00m"
+    else
+        echo -e "\033[32m";
+    fi
+}
+
+function no_error_message {
+    exit $? 
+}
+
+function issue_error_exit_message {
+    errcode=$?
+    trap no_error_message EXIT
+    if [[ $errcode != 0 ]] ; then
+        msg_color "fatal"
+        echo -e "ERROR: installation of SGX driver failed (script=install_sgx_driver.sh, Line: ${BASH_LINENO[0]}, ${BASH_LINENO[1]})"
+        msg_color "default"
+    else
+        msg_color "OK"
+        echo "OK"
+        msg_color "default"
+    fi
+    exit $errcode
+}
+trap issue_error_exit_message EXIT
+
+function verbose
+{
+    echo $@
+}
+
+function log_error
+{
+    msg_color "error"
+    echo $@
+    msg_color "default"
+    exit 1
+}
+
+function check_driver {
+    if [[ ! -e /sys/module/isgx/version ]] ; then
+        install_driver=true
+    else 
+        install_driver=false
+        verbose "SGX-driver already installed."
+        if [[ ! -e /dev/isgx ]] ; then
+            log_error "SGX driver is installed but no SGX device - SGX not enabled?"
+        fi
+    fi
+}
+
+function apply_patches {
+    
+    if [[ $patch_metrics == "1" ]]; then
+        echo "Applying metrics patch..."
+	echo "$metrics_patch_content" | patch -p1
+    fi
+    if [[ $patch_page0 == "1" ]]; then
+        echo "Applying page0 patch..."
+	echo "$page0_patch_content" | patch -p1
+    fi
+#    if [[ $patch_performance == "1" ]]; then
+#        echo "Applying performance patch..."
+#    fi
+}
+
+function install_sgx_driver {
+    commit_sha=${COMMIT_SHA}
+    if [[ $install_driver == true || $force_install ]] ; then
+        dir=$(mktemp -d)
+        cd "$dir"
+        rm -rf linux-sgx-driver
+        git clone https://github.com/intel/linux-sgx-driver.git
+
+        cd linux-sgx-driver/
+        git checkout $commit_sha
+
+        apply_patches
+
+        sudo apt-get update
+        sudo apt-get install -y build-essential
+        sudo apt-get install -y linux-headers-$(uname -r)
+
+        make 
+
+        sudo mkdir -p "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"    
+        sudo cp -f isgx.ko "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"    
+
+        sudo sh -c "cat /etc/modules | grep -Fxq isgx || echo isgx >> /etc/modules"    
+        sudo /sbin/depmod
+        sudo /sbin/modprobe isgx
+
+        cd ..
+    fi
+}
+
+function show_help {
+    echo -e \
+"Usage: install_sgx_driver.sh [OPTION]...
+Helper script to install Intel SGX driver.\n
+The script supports the following commands:
+  help     display this help and exit
+  install  installs the current Intel out of branch driver if not SGX driver is installed
+      -p metrics      installs the metrics patch
+      -p page0        installs the page0 patch
+  force   same as 'install' but will replace existing SGX driver (if installed)"
+#     -p performance  installs the performance patch - requires access to a deployment key
+
+    exit 0
+}
+
+function parse_args {
+    PARAMS=""
+
+    while (( "$#" )); do
+    case "$1" in
+        help)
+        show_help
+        shift
+        ;;
+
+        force)
+        force_install=1
+        shift
+        ;;
+
+        install)
+        arg_install=1
+        shift
+        ;;
+
+        -p)
+        if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+	    if [[ $force_install != 1 && $arg_install != 1 ]]; then
+                msg_color "error"
+                "ERROR: invalid arguments."
+                msg_color "default"
+                show_help
+            fi
+            case "$2" in
+                metrics)
+                patch_metrics=1
+                ;;
+
+                page0)
+                patch_page0=1
+                ;;
+
+                performance)
+                patch_performance=1
+                ;;
+
+                *)
+                msg_color "error"
+                echo "ERROR: patch '$2' is not supported" >&2
+                msg_color "default"
+                exit 1
+            esac
+            shift 2
+        else
+            msg_color "error"
+            echo "ERROR: argument for '$1' is missing" >&2
+            msg_color "default"
+            exit 1
+        fi
+        ;;
+
+        *) # preserve positional arguments
+        msg_color "error"
+        echo "ERROR: unsupported command '$1'" >&2
+        msg_color "default"
+        exit 1
+        ;;
+    esac
+    done
+    # set positional arguments in their proper place
+
+    eval set -- "$PARAMS"
+}
+
+parse_args $@
+
+if [[ $force_install == "1" ]]; then
+    install_sgx_driver
+    exit 0
+fi
+
+if [[ $arg_install == "1" ]]; then
+    check_driver
+    install_sgx_driver
+    exit 0
+fi
+
+show_help
