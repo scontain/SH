@@ -1,0 +1,61 @@
+From 668a6e9a2d1aa49470d2c935862ae77553861dce Mon Sep 17 00:00:00 2001
+From: Chia-Che Tsai <chiache@tamu.edu>
+Date: Fri, 17 May 2019 15:08:49 -0500
+Subject: [PATCH 2/2] Enabling mmap for address unaligned to the enclave range
+
+---
+ sgx_encl.c | 7 ++++---
+ sgx_main.c | 5 +++--
+ 2 files changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/sgx_encl.c b/sgx_encl.c
+index 980a536..4162a2f 100644
+--- a/sgx_encl.c
++++ b/sgx_encl.c
+@@ -655,7 +655,7 @@ int sgx_encl_create(struct sgx_secs *secs)
+ 	}
+ 
+ 	down_read(&current->mm->mmap_sem);
+-	ret = sgx_encl_find(current->mm, secs->base, &vma);
++	ret = sgx_encl_find(current->mm, secs->base + secs->size - PAGE_SIZE, &vma);
+ 	if (ret != -ENOENT) {
+ 		if (!ret)
+ 			ret = -EINVAL;
+@@ -663,8 +663,9 @@ int sgx_encl_create(struct sgx_secs *secs)
+ 		goto out;
+ 	}
+ 
+-	if (vma->vm_start != secs->base ||
+-	    vma->vm_end != (secs->base + secs->size)
++	if (vma->vm_start < secs->base ||
++	    vma->vm_start > (secs->base + secs->size) ||
++	    vma->vm_end < (secs->base + secs->size)
+ 	    /* vma->vm_pgoff != 0 */) {
+ 		ret = -EINVAL;
+ 		up_read(&current->mm->mmap_sem);
+diff --git a/sgx_main.c b/sgx_main.c
+index 170dc8a..69a6f53 100644
+--- a/sgx_main.c
++++ b/sgx_main.c
+@@ -128,7 +128,7 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
+ 					   unsigned long pgoff,
+ 					   unsigned long flags)
+ {
+-	if (len < 2 * PAGE_SIZE || (len & (len - 1)) || flags & MAP_PRIVATE)
++	if (flags & MAP_PRIVATE)
+ 		return -EINVAL;
+ 
+ 	/* On 64-bit architecture, allow mmap() to exceed 32-bit encl
+@@ -153,7 +153,8 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
+ 	if (IS_ERR_VALUE(addr))
+ 		return addr;
+ 
+-	addr = (addr + (len - 1)) & ~(len - 1);
++	if (!(flags & MAP_FIXED))
++		addr = (addr + (len - 1)) & ~(len - 1);
+ 
+ 	return addr;
+ }
+-- 
+2.25.1
+
