@@ -268,18 +268,18 @@ index 0000000..643f7ab
 +#
 +# (C) Christof Fetzer, 2017
 +
-+METRICS="sgx_nr_total_epc_pages \
-+    sgx_nr_free_pages \
-+    sgx_nr_low_pages \
-+    sgx_nr_high_pages \
-+    sgx_nr_marked_old \
-+    sgx_nr_evicted \
-+    sgx_nr_alloc_pages \
-+    sgx_nr_reclaimed \
-+    sgx_init_enclaves \
-+    sgx_nr_added_pages \
-+    sgx_nr_enclaves \
-+    sgx_loaded_back \
++METRICS="sgx_nr_total_epc_pages \@!-tbs-!@
++    sgx_nr_free_pages \@!-tbs-!@
++    sgx_nr_low_pages \@!-tbs-!@
++    sgx_nr_high_pages \@!-tbs-!@
++    sgx_nr_marked_old \@!-tbs-!@
++    sgx_nr_evicted \@!-tbs-!@
++    sgx_nr_alloc_pages \@!-tbs-!@
++    sgx_nr_reclaimed \@!-tbs-!@
++    sgx_init_enclaves \@!-tbs-!@
++    sgx_nr_added_pages \@!-tbs-!@
++    sgx_nr_enclaves \@!-tbs-!@
++    sgx_loaded_back \@!-tbs-!@
 +    "
 +MODPATH="/sys/module/isgx/parameters/"
 +
@@ -364,11 +364,11 @@ function apply_patches {
     
     if [[ $patch_metrics == "1" ]]; then
         echo "Applying metrics patch..."
-	echo "$metrics_patch_content" | patch -p1
+	echo "$metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
     fi
     if [[ $patch_page0 == "1" ]]; then
         echo "Applying page0 patch..."
-	echo "$page0_patch_content" | patch -p1
+	echo "$page0_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
     fi
 #    if [[ $patch_performance == "1" ]]; then
 #        echo "Applying performance patch..."
