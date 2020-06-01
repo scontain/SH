@@ -18,6 +18,8 @@ The following options are supported:
       -p metrics       installs the metrics patch
       -p page0         installs the page0 patch
 
+  -l, --latest         installs the latest upstream driver (not recommended)
+
   -f, --force          replaces existing SGX driver, if installed
   -h, --help           display this help and exit
 ```

@@ -468,7 +468,6 @@ function apply_patches {
 }
 
 function install_sgx_driver {
-    commit_sha="95eaa6f6693cd86c35e10a22b4f8e483373c987c"
     if [[ $install_driver == true || $force_install ]] ; then
         dir=$(mktemp -d)
         cd "$dir"
@@ -476,7 +475,14 @@ function install_sgx_driver {
         git clone https://github.com/intel/linux-sgx-driver.git
 
         cd linux-sgx-driver/
-        git checkout $commit_sha
+
+        if [ -z $install_latest ]; then
+            commit_sha="95eaa6f6693cd86c35e10a22b4f8e483373c987c"
+            git checkout $commit_sha
+        else
+            git checkout master
+            commit_sha="$(git rev-parse HEAD)"
+        fi
 
         apply_patches
 
@@ -510,6 +516,8 @@ The following options are supported:
       -p version       installs the version patch
       -p metrics       installs the metrics patch
       -p page0         installs the page0 patch
+
+  -l, --latest         installs the latest upstream driver (not recommended)
 
   -f, --force          replaces existing SGX driver, if installed
   -h, --help           display this help and exit
@@ -565,6 +573,14 @@ function parse_args {
 
         -f|--force)
         force_install=1
+        shift
+        ;;
+
+        -l|--latest)
+        msg_color "warning"
+        echo "WARNING: the installation of latest upstream driver is not recommended."
+        msg_color "default"
+        install_latest=1
         shift
         ;;
 
