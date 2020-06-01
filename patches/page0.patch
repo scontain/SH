@@ -1,18 +1,32 @@
-From 668a6e9a2d1aa49470d2c935862ae77553861dce Mon Sep 17 00:00:00 2001
+From 4edf6bc51ff79a251de62adbd69ac6062c6f71e4 Mon Sep 17 00:00:00 2001
 From: Chia-Che Tsai <chiache@tamu.edu>
 Date: Fri, 17 May 2019 15:08:49 -0500
-Subject: [PATCH 2/2] Enabling mmap for address unaligned to the enclave range
+Subject: [PATCH 1/1] Enabling mmap for address unaligned to the enclave range
 
 ---
+ sgx.h      | 2 ++
  sgx_encl.c | 7 ++++---
  sgx_main.c | 5 +++--
- 2 files changed, 7 insertions(+), 5 deletions(-)
+ 3 files changed, 9 insertions(+), 5 deletions(-)
 
+diff --git a/sgx.h b/sgx.h
+index 46dfc0f..47758b5 100644
+--- a/sgx.h
++++ b/sgx.h
+@@ -80,6 +80,8 @@
+ 
+ #define SGX_VA_SLOT_COUNT 512
+ 
++#define PATCH_PAGE0 1
++
+ struct sgx_epc_page {
+ 	resource_size_t	pa;
+ 	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
-index 980a536..4162a2f 100644
+index a03c30a..24c0fc4 100644
 --- a/sgx_encl.c
 +++ b/sgx_encl.c
-@@ -655,7 +655,7 @@ int sgx_encl_create(struct sgx_secs *secs)
+@@ -645,7 +645,7 @@ int sgx_encl_create(struct sgx_secs *secs)
  	}
  
  	down_read(&current->mm->mmap_sem);
@@ -21,7 +35,7 @@ index 980a536..4162a2f 100644
  	if (ret != -ENOENT) {
  		if (!ret)
  			ret = -EINVAL;
-@@ -663,8 +663,9 @@ int sgx_encl_create(struct sgx_secs *secs)
+@@ -653,8 +653,9 @@ int sgx_encl_create(struct sgx_secs *secs)
  		goto out;
  	}
  

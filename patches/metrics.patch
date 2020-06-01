@@ -1,16 +1,30 @@
-From 9e41fb97ee9cbf4ab6298e77448552a25a25dd72 Mon Sep 17 00:00:00 2001
+From 3fdb92710912a2881efeb7fa407c8f92ab74f8db Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
 Date: Thu, 21 May 2020 14:21:29 -0300
-Subject: [PATCH 1/2] Add performance counters
+Subject: [PATCH 1/1] Add performance counters
 
 ---
+ sgx.h            |  2 ++
  sgx_encl.c       | 15 +++++++++++++++
  sgx_page_cache.c | 19 +++++++++++++++++++
  sgx_util.c       |  6 ++++++
  show_values.sh   | 22 ++++++++++++++++++++++
- 4 files changed, 62 insertions(+)
+ 5 files changed, 64 insertions(+)
  create mode 100755 show_values.sh
 
+diff --git a/sgx.h b/sgx.h
+index 46dfc0f..8023e55 100644
+--- a/sgx.h
++++ b/sgx.h
+@@ -80,6 +80,8 @@
+ 
+ #define SGX_VA_SLOT_COUNT 512
+ 
++#define PATCH_METRICS 1
++
+ struct sgx_epc_page {
+ 	resource_size_t	pa;
+ 	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
 index a03c30a..980a536 100644
 --- a/sgx_encl.c

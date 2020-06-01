@@ -29,22 +29,97 @@ Copyright (C) 2017-2018 scontain.com
 
 set -e
 
-page0_patch_content=$(cat << 'PAGE0_PATCH_EOF'
-From 668a6e9a2d1aa49470d2c935862ae77553861dce Mon Sep 17 00:00:00 2001
-From: Chia-Che Tsai <chiache@tamu.edu>
-Date: Fri, 17 May 2019 15:08:49 -0500
-Subject: [PATCH 2/2] Enabling mmap for address unaligned to the enclave range
+version_patch_content=$(cat << 'VERSION_PATCH_EOF'
+From a67fe5f84fb296488a834fdb5b26c9d38141fd5a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
+Date: Mon, 1 Jun 2020 12:28:02 -0300
+Subject: [PATCH 1/1] Export patch information
 
 ---
+ sgx_main.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/sgx_main.c b/sgx_main.c
+index 170dc8a..0294a27 100644
+--- a/sgx_main.c
++++ b/sgx_main.c
+@@ -70,6 +70,7 @@
+ #include <linux/hashtable.h>
+ #include <linux/kthread.h>
+ #include <linux/platform_device.h>
++#include <linux/moduleparam.h>
+ 
+ #define DRV_DESCRIPTION "Intel SGX Driver"
+ #define DRV_VERSION "2.6.0"
+@@ -106,6 +107,33 @@ u32 sgx_misc_reserved;
+ u32 sgx_xsave_size_tbl[64];
+ bool sgx_has_sgx2;
+ 
++/*
++ * Patch versions
++ */
++#ifndef PATCH_PAGE0
++#define PATCH_PAGE0 0
++#endif
++
++#ifndef PATCH_METRICS
++#define PATCH_METRICS 0
++#endif
++
++#define IS_DCAP_DRIVER 0
++
++#define COMMIT_SHA "COMMIT_SHA1SUM"
++#define COMMIT_SHA_LEN (40 + 1)
++
++static unsigned int patch_page0 = PATCH_PAGE0;
++static unsigned int patch_metrics = PATCH_METRICS;
++static unsigned int dcap = IS_DCAP_DRIVER;
++static char commit[COMMIT_SHA_LEN] = COMMIT_SHA;
++
++module_param(patch_page0, uint, 0440);
++module_param(patch_metrics, uint, 0440);
++module_param(dcap, uint, 0440);
++module_param_string(commit, commit, COMMIT_SHA_LEN, 0440);
++
++
+ #ifdef CONFIG_COMPAT
+ long sgx_compat_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
+ {
+-- 
+2.25.1
+VERSION_PATCH_EOF
+)
+
+page0_patch_content=$(cat << 'PAGE0_PATCH_EOF'
+From 4edf6bc51ff79a251de62adbd69ac6062c6f71e4 Mon Sep 17 00:00:00 2001
+From: Chia-Che Tsai <chiache@tamu.edu>
+Date: Fri, 17 May 2019 15:08:49 -0500
+Subject: [PATCH 1/1] Enabling mmap for address unaligned to the enclave range
+
+---
+ sgx.h      | 2 ++
  sgx_encl.c | 7 ++++---
  sgx_main.c | 5 +++--
- 2 files changed, 7 insertions(+), 5 deletions(-)
+ 3 files changed, 9 insertions(+), 5 deletions(-)
 
+diff --git a/sgx.h b/sgx.h
+index 46dfc0f..47758b5 100644
+--- a/sgx.h
++++ b/sgx.h
+@@ -80,6 +80,8 @@
+ 
+ #define SGX_VA_SLOT_COUNT 512
+ 
++#define PATCH_PAGE0 1
++
+ struct sgx_epc_page {
+ 	resource_size_t	pa;
+ 	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
-index 980a536..4162a2f 100644
+index a03c30a..24c0fc4 100644
 --- a/sgx_encl.c
 +++ b/sgx_encl.c
-@@ -655,7 +655,7 @@ int sgx_encl_create(struct sgx_secs *secs)
+@@ -645,7 +645,7 @@ int sgx_encl_create(struct sgx_secs *secs)
  	}
  
  	down_read(&current->mm->mmap_sem);
@@ -53,7 +128,7 @@ index 980a536..4162a2f 100644
  	if (ret != -ENOENT) {
  		if (!ret)
  			ret = -EINVAL;
-@@ -663,8 +663,9 @@ int sgx_encl_create(struct sgx_secs *secs)
+@@ -653,8 +653,9 @@ int sgx_encl_create(struct sgx_secs *secs)
  		goto out;
  	}
  
@@ -94,19 +169,33 @@ PAGE0_PATCH_EOF
 )
 
 metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
-From 9e41fb97ee9cbf4ab6298e77448552a25a25dd72 Mon Sep 17 00:00:00 2001
+From 3fdb92710912a2881efeb7fa407c8f92ab74f8db Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
 Date: Thu, 21 May 2020 14:21:29 -0300
-Subject: [PATCH 1/2] Add performance counters
+Subject: [PATCH 1/1] Add performance counters
 
 ---
+ sgx.h            |  2 ++
  sgx_encl.c       | 15 +++++++++++++++
  sgx_page_cache.c | 19 +++++++++++++++++++
  sgx_util.c       |  6 ++++++
  show_values.sh   | 22 ++++++++++++++++++++++
- 4 files changed, 62 insertions(+)
+ 5 files changed, 64 insertions(+)
  create mode 100755 show_values.sh
 
+diff --git a/sgx.h b/sgx.h
+index 46dfc0f..8023e55 100644
+--- a/sgx.h
++++ b/sgx.h
+@@ -80,6 +80,8 @@
+ 
+ #define SGX_VA_SLOT_COUNT 512
+ 
++#define PATCH_METRICS 1
++
+ struct sgx_epc_page {
+ 	resource_size_t	pa;
+ 	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
 index a03c30a..980a536 100644
 --- a/sgx_encl.c
@@ -361,7 +450,10 @@ function check_driver {
 }
 
 function apply_patches {
-    
+    if [[ $patch_version == "1" ]]; then
+        echo "Applying version patch..."
+        echo "$version_patch_content" | sed "s/COMMIT_SHA1SUM/$commit_sha/g" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+    fi    
     if [[ $patch_metrics == "1" ]]; then
         echo "Applying metrics patch..."
 	echo "$metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
@@ -412,9 +504,10 @@ Helper script to install Intel SGX driver.\n
 The script supports the following commands:
   help     display this help and exit
   install  installs the current Intel out of branch driver if not SGX driver is installed
+      -p version      installs the version patch
       -p metrics      installs the metrics patch
       -p page0        installs the page0 patch
-  force   same as 'install' but will replace existing SGX driver (if installed)"
+  force    same as 'install' but will replace existing SGX driver (if installed)"
 #     -p performance  installs the performance patch - requires access to a deployment key
 
     exit 0
@@ -444,21 +537,21 @@ function parse_args {
         if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
 	    if [[ $force_install != 1 && $arg_install != 1 ]]; then
                 msg_color "error"
-                "ERROR: invalid arguments."
+                echo "ERROR: invalid arguments."
                 msg_color "default"
                 show_help
             fi
             case "$2" in
+                version)
+                patch_version=1
+                ;;
+
                 metrics)
                 patch_metrics=1
                 ;;
 
                 page0)
                 patch_page0=1
-                ;;
-
-                performance)
-                patch_performance=1
                 ;;
 
                 *)

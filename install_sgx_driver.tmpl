@@ -29,6 +29,11 @@ Copyright (C) 2017-2018 scontain.com
 
 set -e
 
+version_patch_content=$(cat << 'VERSION_PATCH_EOF'
+${VERSION_PATCH_CONTENT}
+VERSION_PATCH_EOF
+)
+
 page0_patch_content=$(cat << 'PAGE0_PATCH_EOF'
 ${PAGE0_PATCH_CONTENT}
 PAGE0_PATCH_EOF
@@ -109,7 +114,10 @@ function check_driver {
 }
 
 function apply_patches {
-    
+    if [[ $patch_version == "1" ]]; then
+        echo "Applying version patch..."
+        echo "$version_patch_content" | sed "s/COMMIT_SHA1SUM/$commit_sha/g" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+    fi    
     if [[ $patch_metrics == "1" ]]; then
         echo "Applying metrics patch..."
 	echo "$metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
@@ -160,9 +168,10 @@ Helper script to install Intel SGX driver.\n
 The script supports the following commands:
   help     display this help and exit
   install  installs the current Intel out of branch driver if not SGX driver is installed
+      -p version      installs the version patch
       -p metrics      installs the metrics patch
       -p page0        installs the page0 patch
-  force   same as 'install' but will replace existing SGX driver (if installed)"
+  force    same as 'install' but will replace existing SGX driver (if installed)"
 #     -p performance  installs the performance patch - requires access to a deployment key
 
     exit 0
@@ -192,21 +201,21 @@ function parse_args {
         if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
 	    if [[ $force_install != 1 && $arg_install != 1 ]]; then
                 msg_color "error"
-                "ERROR: invalid arguments."
+                echo "ERROR: invalid arguments."
                 msg_color "default"
                 show_help
             fi
             case "$2" in
+                version)
+                patch_version=1
+                ;;
+
                 metrics)
                 patch_metrics=1
                 ;;
 
                 page0)
                 patch_page0=1
-                ;;
-
-                performance)
-                patch_performance=1
                 ;;
 
                 *)
