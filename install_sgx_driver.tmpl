@@ -132,7 +132,7 @@ function apply_patches {
 }
 
 function install_sgx_driver {
-    commit_sha=${COMMIT_SHA}
+    commit_sha="${COMMIT_SHA}"
     if [[ $install_driver == true || $force_install ]] ; then
         dir=$(mktemp -d)
         cd "$dir"
@@ -163,67 +163,84 @@ function install_sgx_driver {
 
 function show_help {
     echo -e \
-"Usage: install_sgx_driver.sh [OPTION]...
+"Usage: install_sgx_driver.sh [COMMAND] [OPTIONS]...
 Helper script to install Intel SGX driver.\n
 The script supports the following commands:
-  help     display this help and exit
-  install  installs the current Intel out of branch driver if not SGX driver is installed
-      -p version      installs the version patch
-      -p metrics      installs the metrics patch
-      -p page0        installs the page0 patch
-  force    same as 'install' but will replace existing SGX driver (if installed)"
+  install              installs the SGX driver
+
+The following options are supported:
+  -p, --patch=[PATCH]  apply patches to the SGX driver. The valid values for PATCH
+                       are: 'version', 'metrics', 'page0'.
+      -p version       installs the version patch
+      -p metrics       installs the metrics patch
+      -p page0         installs the page0 patch
+
+  -f, --force          replaces existing SGX driver, if installed
+  -h, --help           display this help and exit
+
+
+Usage example: to install the SGX driver with 'metrics' and 'page0' patches, run:
+
+./install_sgx_driver.sh install -p metrics -p page0
+"
+
 #     -p performance  installs the performance patch - requires access to a deployment key
 
     exit 0
+}
+
+function enable_patch {
+    case "$1" in
+        version)
+        patch_version=1
+        ;;
+
+        metrics)
+        patch_metrics=1
+        ;;
+
+        page0)
+        patch_page0=1
+        ;;
+
+        *)
+        msg_color "error"
+        echo "ERROR: patch '$1' is not supported" >&2
+        msg_color "default"
+        exit 1
+    esac
 }
 
 function parse_args {
     PARAMS=""
 
     while (( "$#" )); do
-    case "$1" in
-        help)
-        show_help
-        shift
-        ;;
-
-        force)
-        force_install=1
-        shift
-        ;;
-
+    arg=$1
+    case "$arg" in
         install)
         arg_install=1
         shift
         ;;
 
-        -p)
+        -h|--help)
+        show_help
+        shift
+        ;;
+
+        -f|--force)
+        force_install=1
+        shift
+        ;;
+
+        -p|--patch)
         if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
-	    if [[ $force_install != 1 && $arg_install != 1 ]]; then
+            if [[ $arg_install != 1 ]]; then
                 msg_color "error"
                 echo "ERROR: invalid arguments."
                 msg_color "default"
                 show_help
             fi
-            case "$2" in
-                version)
-                patch_version=1
-                ;;
-
-                metrics)
-                patch_metrics=1
-                ;;
-
-                page0)
-                patch_page0=1
-                ;;
-
-                *)
-                msg_color "error"
-                echo "ERROR: patch '$2' is not supported" >&2
-                msg_color "default"
-                exit 1
-            esac
+            enable_patch $2
             shift 2
         else
             msg_color "error"
@@ -231,6 +248,12 @@ function parse_args {
             msg_color "default"
             exit 1
         fi
+        ;;
+
+        --patch=*)
+        echo "${i#*=}"
+        enable_patch "${1#*=}"
+        shift
         ;;
 
         *) # preserve positional arguments
@@ -248,13 +271,10 @@ function parse_args {
 
 parse_args $@
 
-if [[ $force_install == "1" ]]; then
-    install_sgx_driver
-    exit 0
-fi
-
 if [[ $arg_install == "1" ]]; then
-    check_driver
+    if [[ -z $force_install ]]; then
+        check_driver
+    fi
     install_sgx_driver
     exit 0
 fi
