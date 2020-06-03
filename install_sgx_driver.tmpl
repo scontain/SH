@@ -44,6 +44,8 @@ ${METRICS_PATCH_CONTENT}
 METRICS_PATCH_EOF
 )
 
+driver_commit="${COMMIT_SHA}"
+
 # print the right color for each level
 #
 # Arguments:
@@ -141,7 +143,7 @@ function install_sgx_driver {
         cd linux-sgx-driver/
 
         if [ -z $install_latest ]; then
-            commit_sha="${COMMIT_SHA}"
+            commit_sha=$driver_commit
             git checkout $commit_sha
         else
             git checkout master
@@ -156,10 +158,10 @@ function install_sgx_driver {
 
         make 
 
-        sudo mkdir -p "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"    
-        sudo cp -f isgx.ko "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"    
+        sudo mkdir -p "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"
+        sudo cp -f isgx.ko "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"
 
-        sudo sh -c "cat /etc/modules | grep -Fxq isgx || echo isgx >> /etc/modules"    
+        sudo sh -c "cat /etc/modules | grep -Fxq isgx || echo isgx >> /etc/modules"
         sudo /sbin/depmod
         sudo /sbin/modprobe isgx
 
