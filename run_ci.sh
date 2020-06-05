@@ -1,9 +1,8 @@
 #!/bin/bash
 
-patches="version metrics page0"
+patches="version metrics page0 dcap"
 
 installer_url="https://raw.githubusercontent.com/scontain/SH/master/install_sgx_driver.sh"
-driver_repository="https://github.com/intel/linux-sgx-driver.git"
 
 function download_installer {
     echo -n "INFO: Downlading installer from $installer_url... "
@@ -20,14 +19,32 @@ function prepare_args {
 }
 
 function check_commit_sha {
-    script_commit_sha=$(echo "$installer_content" | grep "driver_commit=" | cut -d'=' -f2 | sed 's/"//g')
-    master_commit_sha=$(git ls-remote https://github.com/intel/linux-sgx-driver.git refs/heads/master | awk '{ print $1 }')
+    echo -n "TEST: Verifying OOT driver commit stamp... "
 
-    if [[ $script_commit_sha != $master_commit_sha ]]; then
-        echo "FAIL: Installer commit stamp differs from repository one. Please, update the installer."
-        echo "[installer = $script_commit_sha; remote = $master_commit_sha]"
+    oot_script_commit_sha=$(echo "$installer_content" | grep "oot_driver_commit=" | cut -d'=' -f2 | sed 's/"//g')
+    oot_master_commit_sha=$(git ls-remote https://github.com/intel/linux-sgx-driver.git refs/heads/master | awk '{ print $1 }')
+
+    if [[ $oot_script_commit_sha != $oot_master_commit_sha ]]; then
+        echo -e "\nFAIL: Installer OOT commit stamp differs from repository one. Please, update the installer."
+        echo "[installer = $oot_script_commit_sha; remote = $oot_master_commit_sha]"
 
         exit 1
+    else
+        echo "Done!"
+    fi
+
+    echo -n "TEST: Verifying DCAP driver commit stamp... "
+
+    dcap_script_commit_sha=$(echo "$installer_content" | grep "dcap_driver_commit=" | cut -d'=' -f2 | sed 's/"//g')
+    dcap_master_commit_sha=$(git ls-remote https://github.com/intel/SGXDataCenterAttestationPrimitives.git refs/heads/master | awk '{ print $1 }')
+
+    if [[ $dcap_script_commit_sha != $dcap_master_commit_sha ]]; then
+        echo "FAIL: Installer DCAP commit stamp differs from repository one. Please, update the installer."
+        echo "[installer = $dcap_script_commit_sha; remote = $dcap_master_commit_sha]"
+
+        exit 1
+    else
+        echo "Done!"
     fi
 }
 
@@ -51,7 +68,7 @@ while read -r line
 do
     args=$(prepare_args "$line")
 
-    echo "INFO: Running with arguments: install --force $args"
+    echo "TEST: Running the installer with arguments: install --force $args"
     echo "$installer_content" | bash -s - install --force $args
 
     ret=$?

@@ -29,66 +29,220 @@ Copyright (C) 2017-2018 scontain.com
 
 set -e
 
-oot_version_patch_content=$(cat << 'VERSION_PATCH_EOF'
-From a67fe5f84fb296488a834fdb5b26c9d38141fd5a Mon Sep 17 00:00:00 2001
+# OOT Patches
+oot_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
+From 25330b3c753a8314d95b379ed807fdb4302c8526 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
-Date: Mon, 1 Jun 2020 12:28:02 -0300
-Subject: [PATCH 1/1] Export patch information
+Date: Thu, 21 May 2020 14:21:29 -0300
+Subject: [PATCH 1/1] Add performance counters
 
 ---
- sgx_main.c | 28 ++++++++++++++++++++++++++++
- 1 file changed, 28 insertions(+)
+ sgx.h            |  2 ++
+ sgx_encl.c       | 15 +++++++++++++++
+ sgx_page_cache.c | 19 +++++++++++++++++++
+ sgx_util.c       |  7 +++++++
+ show_values.sh   | 22 ++++++++++++++++++++++
+ 5 files changed, 65 insertions(+)
+ create mode 100755 show_values.sh
 
-diff --git a/sgx_main.c b/sgx_main.c
-index 170dc8a..0294a27 100644
---- a/sgx_main.c
-+++ b/sgx_main.c
-@@ -70,6 +70,7 @@
+diff --git a/sgx.h b/sgx.h
+index 590464d..37295bf 100644
+--- a/sgx.h
++++ b/sgx.h
+@@ -80,6 +80,8 @@
+ 
+ #define SGX_VA_SLOT_COUNT 512
+ 
++#define PATCH_METRICS 2
++
+ struct sgx_epc_page {
+ 	resource_size_t	pa;
+ 	struct list_head list;
+diff --git a/sgx_encl.c b/sgx_encl.c
+index 6815c43..071c5bd 100644
+--- a/sgx_encl.c
++++ b/sgx_encl.c
+@@ -73,6 +73,14 @@
+ #include <linux/slab.h>
  #include <linux/hashtable.h>
- #include <linux/kthread.h>
- #include <linux/platform_device.h>
+ #include <linux/shmem_fs.h>
++#include <linux/moduleparam.h>
++
++static unsigned int sgx_nr_enclaves;
++static unsigned int sgx_nr_added_pages;
++static unsigned int sgx_init_enclaves;
++module_param(sgx_init_enclaves, uint, 0440);
++module_param(sgx_nr_added_pages, uint, 0440);
++module_param(sgx_nr_enclaves, uint, 0440);
+ 
+ struct sgx_add_page_req {
+ 	struct sgx_encl *encl;
+@@ -221,6 +229,8 @@ static int sgx_eadd(struct sgx_epc_page *secs_page,
+ 	sgx_put_page((void *)(unsigned long)pginfo.secs);
+ 	kunmap_atomic((void *)(unsigned long)pginfo.srcpge);
+ 
++	sgx_nr_added_pages++;
++
+ 	return ret;
+ }
+ 
+@@ -663,6 +673,8 @@ int sgx_encl_create(struct sgx_secs *secs)
+ 	list_add_tail(&encl->encl_list, &encl->tgid_ctx->encl_list);
+ 	mutex_unlock(&sgx_tgid_ctx_mutex);
+ 
++	sgx_nr_enclaves++;
++
+ 	return 0;
+ out:
+ 	if (encl)
+@@ -948,6 +960,8 @@ int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
+ 	}
+ 
+ 	encl->flags |= SGX_ENCL_INITIALIZED;
++
++	sgx_init_enclaves++;
+ 	return 0;
+ }
+ 
+@@ -999,4 +1013,5 @@ void sgx_encl_release(struct kref *ref)
+ 		fput(encl->pcmd);
+ 
+ 	kfree(encl);
++	sgx_nr_enclaves--;
+ }
+diff --git a/sgx_page_cache.c b/sgx_page_cache.c
+index 3770ad4..d1aebf9 100644
+--- a/sgx_page_cache.c
++++ b/sgx_page_cache.c
+@@ -69,6 +69,7 @@
+ 	#include <linux/signal.h>
+ #endif
+ #include <linux/slab.h>
 +#include <linux/moduleparam.h>
  
- #define DRV_DESCRIPTION "Intel SGX Driver"
- #define DRV_VERSION "2.6.0"
-@@ -106,6 +107,33 @@ u32 sgx_misc_reserved;
- u32 sgx_xsave_size_tbl[64];
- bool sgx_has_sgx2;
+ #define SGX_NR_LOW_EPC_PAGES_DEFAULT 32
+ #define SGX_NR_SWAP_CLUSTER_MAX	16
+@@ -81,11 +82,24 @@ DEFINE_MUTEX(sgx_tgid_ctx_mutex);
+ atomic_t sgx_va_pages_cnt = ATOMIC_INIT(0);
+ static unsigned int sgx_nr_total_epc_pages;
+ static unsigned int sgx_nr_free_pages;
++static unsigned int sgx_nr_reclaimed;
+ static unsigned int sgx_nr_low_pages = SGX_NR_LOW_EPC_PAGES_DEFAULT;
+ static unsigned int sgx_nr_high_pages;
++static unsigned int sgx_nr_marked_old;
++static unsigned int sgx_nr_evicted;
++static unsigned int sgx_nr_alloc_pages;
+ static struct task_struct *ksgxswapd_tsk;
+ static DECLARE_WAIT_QUEUE_HEAD(ksgxswapd_waitq);
  
-+/*
-+ * Patch versions
-+ */
-+#ifndef PATCH_PAGE0
-+#define PATCH_PAGE0 0
-+#endif
++module_param(sgx_nr_total_epc_pages, uint, 0440);
++module_param(sgx_nr_free_pages, uint, 0440);
++module_param(sgx_nr_low_pages, uint, 0440);
++module_param(sgx_nr_high_pages, uint, 0440);
++module_param(sgx_nr_marked_old, uint, 0440);
++module_param(sgx_nr_evicted, uint, 0440);
++module_param(sgx_nr_alloc_pages, uint, 0440);
++module_param(sgx_nr_reclaimed, uint, 0440);
 +
-+#ifndef PATCH_METRICS
-+#define PATCH_METRICS 0
-+#endif
-+
-+#define IS_DCAP_DRIVER 0
-+
-+#define COMMIT_SHA "COMMIT_SHA1SUM"
-+#define COMMIT_SHA_LEN (40 + 1)
-+
-+static unsigned int patch_page0 = PATCH_PAGE0;
-+static unsigned int patch_metrics = PATCH_METRICS;
-+static unsigned int dcap = IS_DCAP_DRIVER;
-+static char commit[COMMIT_SHA_LEN] = COMMIT_SHA;
-+
-+module_param(patch_page0, uint, 0440);
-+module_param(patch_metrics, uint, 0440);
-+module_param(dcap, uint, 0440);
-+module_param_string(commit, commit, COMMIT_SHA_LEN, 0440);
-+
-+
- #ifdef CONFIG_COMPAT
- long sgx_compat_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
+ static int sgx_test_and_clear_young_cb(pte_t *ptep,
+ #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 3, 0))
+     #if( defined(RHEL_RELEASE_VERSION) && defined(RHEL_RELEASE_CODE))
+@@ -104,6 +118,7 @@ static int sgx_test_and_clear_young_cb(pte_t *ptep,
+ 	ret = pte_young(*ptep);
+ 	if (ret) {
+ 		pte = pte_mkold(*ptep);
++		sgx_nr_marked_old++; // only statistics counter, ok not to be completely correct...
+ 		set_pte_at((struct mm_struct *)data, addr, ptep, pte);
+ 	}
+ 
+@@ -314,6 +329,7 @@ static bool sgx_ewb(struct sgx_encl *encl,
+ static void sgx_evict_page(struct sgx_encl_page *entry,
+ 			   struct sgx_encl *encl)
  {
++	sgx_nr_evicted++;  // races are acceptable..
+ 	sgx_ewb(encl, entry);
+ 	sgx_free_page(entry->epc_page, encl);
+ 	entry->epc_page = NULL;
+@@ -352,11 +368,13 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
+ 		list_del(&entry->list);
+ 		sgx_evict_page(entry->encl_page, encl);
+ 		encl->secs_child_cnt--;
++		sgx_nr_reclaimed++;
+ 	}
+ 
+ 	if (!encl->secs_child_cnt && (encl->flags & SGX_ENCL_INITIALIZED)) {
+ 		sgx_evict_page(&encl->secs, encl);
+ 		encl->flags |= SGX_ENCL_SECS_EVICTED;
++		sgx_nr_reclaimed++;
+ 	}
+ 
+ 	mutex_unlock(&encl->lock);
+@@ -526,6 +544,7 @@ struct sgx_epc_page *sgx_alloc_page(unsigned int flags)
+ 		schedule();
+ 	}
+ 
++	sgx_nr_alloc_pages++; // ignore races..
+ 	if (sgx_nr_free_pages < sgx_nr_low_pages)
+ 		wake_up(&ksgxswapd_waitq);
+ 
+diff --git a/sgx_util.c b/sgx_util.c
+index 38013e2..681ef43 100644
+--- a/sgx_util.c
++++ b/sgx_util.c
+@@ -66,6 +66,11 @@
+ #else
+ 	#include <linux/mm.h>
+ #endif
++#include <linux/moduleparam.h>
++
++static unsigned int sgx_loaded_back;
++module_param(sgx_loaded_back, uint, 0440);
++
+ int sgx_vm_insert_pfn(struct vm_area_struct *vma, unsigned long addr, resource_size_t pa)
+ {
+ 	int rc;
+@@ -220,6 +225,8 @@ int sgx_eldu(struct sgx_encl *encl,
+ 		ret = -EFAULT;
+ 	}
+ 
++	sgx_loaded_back++;
++
+ 	kunmap_atomic((void *)(unsigned long)(pginfo.pcmd - pcmd_offset));
+ 	kunmap_atomic((void *)(unsigned long)pginfo.srcpge);
+ 	sgx_put_page(va_ptr);
+diff --git a/show_values.sh b/show_values.sh
+new file mode 100755
+index 0000000..643f7ab
+--- /dev/null
++++ b/show_values.sh
+@@ -0,0 +1,22 @@
++#!/bin/bash
++#
++# (C) Christof Fetzer, 2017
++
++METRICS="sgx_nr_total_epc_pages \@!-tbs-!@
++    sgx_nr_free_pages \@!-tbs-!@
++    sgx_nr_low_pages \@!-tbs-!@
++    sgx_nr_high_pages \@!-tbs-!@
++    sgx_nr_marked_old \@!-tbs-!@
++    sgx_nr_evicted \@!-tbs-!@
++    sgx_nr_alloc_pages \@!-tbs-!@
++    sgx_nr_reclaimed \@!-tbs-!@
++    sgx_init_enclaves \@!-tbs-!@
++    sgx_nr_added_pages \@!-tbs-!@
++    sgx_nr_enclaves \@!-tbs-!@
++    sgx_loaded_back \@!-tbs-!@
++    "
++MODPATH="/sys/module/isgx/parameters/"
++
++for metric in $METRICS ; do
++    echo "$metric= `cat $MODPATH/$metric`"
++done
 -- 
 2.25.1
-VERSION_PATCH_EOF
+METRICS_PATCH_EOF
 )
+oot_metrics_patch_version=2
 
 oot_page0_patch_content=$(cat << 'PAGE0_PATCH_EOF'
 From 4edf6bc51ff79a251de62adbd69ac6062c6f71e4 Mon Sep 17 00:00:00 2001
@@ -167,242 +321,37 @@ index 170dc8a..69a6f53 100644
 2.25.1
 PAGE0_PATCH_EOF
 )
+oot_page0_patch_version=1
 
-oot_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
-From 3fdb92710912a2881efeb7fa407c8f92ab74f8db Mon Sep 17 00:00:00 2001
+oot_version_patch_content=$(cat << 'VERSION_PATCH_EOF'
+From 403cb32324acaebafdf0258774b8171670fb7680 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
-Date: Thu, 21 May 2020 14:21:29 -0300
-Subject: [PATCH 1/1] Add performance counters
-
----
- sgx.h            |  2 ++
- sgx_encl.c       | 15 +++++++++++++++
- sgx_page_cache.c | 19 +++++++++++++++++++
- sgx_util.c       |  6 ++++++
- show_values.sh   | 22 ++++++++++++++++++++++
- 5 files changed, 64 insertions(+)
- create mode 100755 show_values.sh
-
-diff --git a/sgx.h b/sgx.h
-index 46dfc0f..8023e55 100644
---- a/sgx.h
-+++ b/sgx.h
-@@ -80,6 +80,8 @@
- 
- #define SGX_VA_SLOT_COUNT 512
- 
-+#define PATCH_METRICS 1
-+
- struct sgx_epc_page {
- 	resource_size_t	pa;
- 	struct list_head list;
-diff --git a/sgx_encl.c b/sgx_encl.c
-index a03c30a..980a536 100644
---- a/sgx_encl.c
-+++ b/sgx_encl.c
-@@ -73,6 +73,14 @@
- #include <linux/slab.h>
- #include <linux/hashtable.h>
- #include <linux/shmem_fs.h>
-+#include <linux/moduleparam.h>
-+
-+static unsigned int sgx_nr_enclaves;
-+static unsigned int sgx_nr_added_pages;
-+static unsigned int sgx_init_enclaves;
-+module_param(sgx_init_enclaves, uint, 0440);
-+module_param(sgx_nr_added_pages, uint, 0440);
-+module_param(sgx_nr_enclaves, uint, 0440);
- 
- struct sgx_add_page_req {
- 	struct sgx_encl *encl;
-@@ -221,6 +229,8 @@ static int sgx_eadd(struct sgx_epc_page *secs_page,
- 	sgx_put_page((void *)(unsigned long)pginfo.secs);
- 	kunmap_atomic((void *)(unsigned long)pginfo.srcpge);
- 
-+	sgx_nr_added_pages++;
-+
- 	return ret;
- }
- 
-@@ -668,6 +678,8 @@ int sgx_encl_create(struct sgx_secs *secs)
- 	list_add_tail(&encl->encl_list, &encl->tgid_ctx->encl_list);
- 	mutex_unlock(&sgx_tgid_ctx_mutex);
- 
-+	sgx_nr_enclaves++;
-+
- 	return 0;
- out:
- 	if (encl)
-@@ -953,6 +965,8 @@ int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
- 	}
- 
- 	encl->flags |= SGX_ENCL_INITIALIZED;
-+
-+	sgx_init_enclaves++;
- 	return 0;
- }
- 
-@@ -1004,4 +1018,5 @@ void sgx_encl_release(struct kref *ref)
- 		fput(encl->pcmd);
- 
- 	kfree(encl);
-+	sgx_nr_enclaves--;
- }
-diff --git a/sgx_page_cache.c b/sgx_page_cache.c
-index ed7c6be..82d16de 100644
---- a/sgx_page_cache.c
-+++ b/sgx_page_cache.c
-@@ -69,6 +69,7 @@
- 	#include <linux/signal.h>
- #endif
- #include <linux/slab.h>
-+#include <linux/moduleparam.h>
- 
- #define SGX_NR_LOW_EPC_PAGES_DEFAULT 32
- #define SGX_NR_SWAP_CLUSTER_MAX	16
-@@ -81,11 +82,24 @@ DEFINE_MUTEX(sgx_tgid_ctx_mutex);
- atomic_t sgx_va_pages_cnt = ATOMIC_INIT(0);
- static unsigned int sgx_nr_total_epc_pages;
- static unsigned int sgx_nr_free_pages;
-+static unsigned int sgx_nr_reclaimed;
- static unsigned int sgx_nr_low_pages = SGX_NR_LOW_EPC_PAGES_DEFAULT;
- static unsigned int sgx_nr_high_pages;
-+static unsigned int sgx_nr_marked_old;
-+static unsigned int sgx_nr_evicted;
-+static unsigned int sgx_nr_alloc_pages;
- static struct task_struct *ksgxswapd_tsk;
- static DECLARE_WAIT_QUEUE_HEAD(ksgxswapd_waitq);
- 
-+module_param(sgx_nr_total_epc_pages, uint, 0440);
-+module_param(sgx_nr_free_pages, uint, 0440);
-+module_param(sgx_nr_low_pages, uint, 0440);
-+module_param(sgx_nr_high_pages, uint, 0440);
-+module_param(sgx_nr_marked_old, uint, 0440);
-+module_param(sgx_nr_evicted, uint, 0440);
-+module_param(sgx_nr_alloc_pages, uint, 0440);
-+module_param(sgx_nr_reclaimed, uint, 0440);
-+
- static int sgx_test_and_clear_young_cb(pte_t *ptep,
- #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 3, 0))
- 		pgtable_t token,
-@@ -98,6 +112,7 @@ static int sgx_test_and_clear_young_cb(pte_t *ptep,
- 	ret = pte_young(*ptep);
- 	if (ret) {
- 		pte = pte_mkold(*ptep);
-+		sgx_nr_marked_old++; // only statistics counter, ok not to be completely correct...
- 		set_pte_at((struct mm_struct *)data, addr, ptep, pte);
- 	}
- 
-@@ -308,6 +323,7 @@ static bool sgx_ewb(struct sgx_encl *encl,
- static void sgx_evict_page(struct sgx_encl_page *entry,
- 			   struct sgx_encl *encl)
- {
-+	sgx_nr_evicted++;  // races are acceptable..
- 	sgx_ewb(encl, entry);
- 	sgx_free_page(entry->epc_page, encl);
- 	entry->epc_page = NULL;
-@@ -346,11 +362,13 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
- 		list_del(&entry->list);
- 		sgx_evict_page(entry->encl_page, encl);
- 		encl->secs_child_cnt--;
-+		sgx_nr_reclaimed++;
- 	}
- 
- 	if (!encl->secs_child_cnt && (encl->flags & SGX_ENCL_INITIALIZED)) {
- 		sgx_evict_page(&encl->secs, encl);
- 		encl->flags |= SGX_ENCL_SECS_EVICTED;
-+		sgx_nr_reclaimed++;
- 	}
- 
- 	mutex_unlock(&encl->lock);
-@@ -520,6 +538,7 @@ struct sgx_epc_page *sgx_alloc_page(unsigned int flags)
- 		schedule();
- 	}
- 
-+	sgx_nr_alloc_pages++; // ignore races..
- 	if (sgx_nr_free_pages < sgx_nr_low_pages)
- 		wake_up(&ksgxswapd_waitq);
- 
-diff --git a/sgx_util.c b/sgx_util.c
-index 25b18a9..af40961 100644
---- a/sgx_util.c
-+++ b/sgx_util.c
-@@ -66,6 +66,10 @@
- #else
- 	#include <linux/mm.h>
- #endif
-+#include <linux/moduleparam.h>
-+
-+static unsigned int sgx_loaded_back;
-+module_param(sgx_loaded_back, uint, 0440);
- 
- struct page *sgx_get_backing(struct sgx_encl *encl,
- 			     struct sgx_encl_page *entry,
-@@ -195,6 +199,8 @@ int sgx_eldu(struct sgx_encl *encl,
- 		ret = -EFAULT;
- 	}
- 
-+	sgx_loaded_back++;
-+
- 	kunmap_atomic((void *)(unsigned long)(pginfo.pcmd - pcmd_offset));
- 	kunmap_atomic((void *)(unsigned long)pginfo.srcpge);
- 	sgx_put_page(va_ptr);
-diff --git a/show_values.sh b/show_values.sh
-new file mode 100755
-index 0000000..643f7ab
---- /dev/null
-+++ b/show_values.sh
-@@ -0,0 +1,22 @@
-+#!/bin/bash
-+#
-+# (C) Christof Fetzer, 2017
-+
-+METRICS="sgx_nr_total_epc_pages \@!-tbs-!@
-+    sgx_nr_free_pages \@!-tbs-!@
-+    sgx_nr_low_pages \@!-tbs-!@
-+    sgx_nr_high_pages \@!-tbs-!@
-+    sgx_nr_marked_old \@!-tbs-!@
-+    sgx_nr_evicted \@!-tbs-!@
-+    sgx_nr_alloc_pages \@!-tbs-!@
-+    sgx_nr_reclaimed \@!-tbs-!@
-+    sgx_init_enclaves \@!-tbs-!@
-+    sgx_nr_added_pages \@!-tbs-!@
-+    sgx_nr_enclaves \@!-tbs-!@
-+    sgx_loaded_back \@!-tbs-!@
-+    "
-+MODPATH="/sys/module/isgx/parameters/"
-+
-+for metric in $METRICS ; do
-+    echo "$metric= `cat $MODPATH/$metric`"
-+done
--- 
-2.25.1
-METRICS_PATCH_EOF
-)
-
-dcap_version_patch_content=$(cat << 'VERSION_PATCH_EOF'
-From bd723460ef3691d87d153c8a85ca009c23eb9e31 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
-Date: Thu, 4 Jun 2020 18:24:35 -0300
+Date: Mon, 1 Jun 2020 12:28:02 -0300
 Subject: [PATCH 1/1] Export patch information
 
 ---
- driver/linux/main.c | 28 ++++++++++++++++++++++++++++
+ sgx_main.c | 28 ++++++++++++++++++++++++++++
  1 file changed, 28 insertions(+)
 
-diff --git a/driver/linux/main.c b/driver/linux/main.c
-index 82c7b77..503471e 100644
---- a/driver/linux/main.c
-+++ b/driver/linux/main.c
-@@ -25,6 +25,34 @@
- struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
- int sgx_nr_epc_sections;
+diff --git a/sgx_main.c b/sgx_main.c
+index 170dc8a..ffd3a39 100644
+--- a/sgx_main.c
++++ b/sgx_main.c
+@@ -70,6 +70,7 @@
+ #include <linux/hashtable.h>
+ #include <linux/kthread.h>
+ #include <linux/platform_device.h>
++#include <linux/moduleparam.h>
+ 
+ #define DRV_DESCRIPTION "Intel SGX Driver"
+ #define DRV_VERSION "2.6.0"
+@@ -106,6 +107,33 @@ u32 sgx_misc_reserved;
+ u32 sgx_xsave_size_tbl[64];
+ bool sgx_has_sgx2;
  
 +/*
 + * Patch versions
 + */
-+#include <linux/moduleparam.h>
-+
 +#ifndef PATCH_PAGE0
 +#define PATCH_PAGE0 0
 +#endif
@@ -411,7 +360,7 @@ index 82c7b77..503471e 100644
 +#define PATCH_METRICS 0
 +#endif
 +
-+#define IS_DCAP_DRIVER 1
++#define IS_DCAP_DRIVER 0
 +
 +#define COMMIT_SHA "COMMIT_SHA1SUM"
 +#define COMMIT_SHA_LEN (40 + 1)
@@ -421,19 +370,21 @@ index 82c7b77..503471e 100644
 +static unsigned int dcap = IS_DCAP_DRIVER;
 +static char commit[COMMIT_SHA_LEN] = COMMIT_SHA;
 +
-+module_param(patch_page0, uint, 0440);
-+module_param(patch_metrics, uint, 0440);
-+module_param(dcap, uint, 0440);
-+module_param_string(commit, commit, COMMIT_SHA_LEN, 0440);
++module_param(patch_page0, uint, 0444);
++module_param(patch_metrics, uint, 0444);
++module_param(dcap, uint, 0444);
++module_param_string(commit, commit, COMMIT_SHA_LEN, 0444);
 +
- // Based on arch/x86/kernel/cpu/intel.c
- static bool detect_sgx(struct cpuinfo_x86 *c)
++
+ #ifdef CONFIG_COMPAT
+ long sgx_compat_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
  {
 -- 
 2.25.1
 VERSION_PATCH_EOF
 )
 
+# DCAP Patches
 dcap_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
 From 17575a61a2667b20c1984b39014583811d83e5cf Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
@@ -673,8 +624,64 @@ index 0000000..af9e2d8
 2.25.1
 METRICS_PATCH_EOF
 )
+dcap_metrics_patch_version=1
 
-oot_driver_commit="95eaa6f6693cd86c35e10a22b4f8e483373c987c"
+dcap_version_patch_content=$(cat << 'VERSION_PATCH_EOF'
+From d40b7b1025402f26f1b51afb92698764b4b16614 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
+Date: Thu, 4 Jun 2020 18:24:35 -0300
+Subject: [PATCH 1/1] Export patch information
+
+---
+ driver/linux/main.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/driver/linux/main.c b/driver/linux/main.c
+index 82c7b77..36b4cdd 100644
+--- a/driver/linux/main.c
++++ b/driver/linux/main.c
+@@ -25,6 +25,34 @@
+ struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
+ int sgx_nr_epc_sections;
+ 
++/*
++ * Patch versions
++ */
++#include <linux/moduleparam.h>
++
++#ifndef PATCH_PAGE0
++#define PATCH_PAGE0 0
++#endif
++
++#ifndef PATCH_METRICS
++#define PATCH_METRICS 0
++#endif
++
++#define IS_DCAP_DRIVER 1
++
++#define COMMIT_SHA "COMMIT_SHA1SUM"
++#define COMMIT_SHA_LEN (40 + 1)
++
++static unsigned int patch_page0 = PATCH_PAGE0;
++static unsigned int patch_metrics = PATCH_METRICS;
++static unsigned int dcap = IS_DCAP_DRIVER;
++static char commit[COMMIT_SHA_LEN] = COMMIT_SHA;
++
++module_param(patch_page0, uint, 0444);
++module_param(patch_metrics, uint, 0444);
++module_param(dcap, uint, 0444);
++module_param_string(commit, commit, COMMIT_SHA_LEN, 0444);
++
+ // Based on arch/x86/kernel/cpu/intel.c
+ static bool detect_sgx(struct cpuinfo_x86 *c)
+ {
+-- 
+2.25.1
+VERSION_PATCH_EOF
+)
+
+# OOT & DCAP Commits
+oot_driver_commit="7acda57e771d49d9e2142059b346b778349f653a"
 dcap_driver_commit="bfa5d8f6935238c170324cac482b04650d2db4ac"
 
 # print the right color for each level
@@ -769,6 +776,19 @@ function check_driver {
     fi
 }
 
+function install_common_dependencies {
+    msg_color "info"
+    echo "INFO: Installing dependencies... "
+    msg_color "default"
+    
+    sudo apt-get update > /dev/null && \
+    sudo apt-get install -y build-essential git patch linux-headers-$(uname -r) > /dev/null
+
+    msg_color "info"
+    echo "INFO: Done!"
+    msg_color "default"
+}
+
 function apply_oot_patches {
     if [[ $patch_version == "1" ]]; then
         echo "Applying version patch..."
@@ -789,12 +809,13 @@ function apply_oot_patches {
 
 function install_oot_sgx_driver {
     if [[ $install_driver == true || $force_install ]] ; then
+        install_common_dependencies
+
         dir=$(mktemp -d)
         cd "$dir"
-        rm -rf linux-sgx-driver
-        git clone https://github.com/intel/linux-sgx-driver.git
+        git clone https://github.com/intel/linux-sgx-driver.git driver_source
 
-        cd linux-sgx-driver/
+        cd driver_source/
 
         if [ -z $install_latest ]; then
             oot_commit_sha=$oot_driver_commit
@@ -806,10 +827,6 @@ function install_oot_sgx_driver {
 
         apply_oot_patches
 
-        sudo apt-get update
-        sudo apt-get install -y build-essential
-        sudo apt-get install -y linux-headers-$(uname -r)
-
         make 
 
         sudo mkdir -p "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"
@@ -817,9 +834,10 @@ function install_oot_sgx_driver {
 
         sudo sh -c "cat /etc/modules | grep -Fxq isgx || echo isgx >> /etc/modules"
         sudo /sbin/depmod
-        sudo /sbin/modprobe isgx
+        sudo /sbin/modprobe isgx || true
 
-        cd ..
+        cd "$dir"/..
+        rm -rf "$dir"
     fi
 }
 
@@ -844,12 +862,22 @@ function apply_dcap_patches {
 
 function install_dcap_sgx_driver {
     if [[ $install_driver == true || $force_install ]] ; then
+        install_common_dependencies
+
+        msg_color "info"
+        echo -n "INFO: Installing DKMS... "
+
+        sudo apt-get install -y dkms > /dev/null
+
+        echo "Done!"
+
+        msg_color "default"
+
         dir=$(mktemp -d)
         cd "$dir"
-        rm -rf SGXDataCenterAttestationPrimitives
-        git clone https://github.com/intel/SGXDataCenterAttestationPrimitives.git
+        git clone https://github.com/intel/SGXDataCenterAttestationPrimitives.git driver_source
 
-        cd SGXDataCenterAttestationPrimitives/driver/linux
+        cd driver_source/driver/linux
 
         if [ -z $install_latest ]; then
             dcap_commit_sha=$dcap_driver_commit
@@ -867,19 +895,15 @@ function install_dcap_sgx_driver {
             log_error "Unable to detect DCAP driver version!"
         fi
 
-        sudo apt-get update
-        sudo apt-get install -y build-essential dkms linux-headers-$(uname -r)
-
         sudo rm -rf /usr/src/sgx-$driver_ver
         sudo mkdir -p /usr/src/sgx-$driver_ver
 
         sudo cp -rf * /usr/src/sgx-$driver_ver/
 
         sudo dkms remove sgx/$driver_ver --all --force || true
-        sudo dkms add -m sgx -v $driver_ver
-        sudo dkms build -m sgx -v $driver_ver
-        sudo dkms install -m sgx -v $driver_ver
-        
+        sudo dkms add -m sgx -v $driver_ver --force
+        sudo dkms build -m sgx -v $driver_ver --force
+        sudo dkms install -m sgx -v $driver_ver --force
 
         sudo cp 10-sgx.rules /etc/udev/rules.d
         sudo groupadd -f sgx_prv
@@ -888,9 +912,10 @@ function install_dcap_sgx_driver {
         sudo sh -c "cat /etc/modules | grep -Fxq intel_sgx || echo intel_sgx >> /etc/modules"
 
         sudo /sbin/depmod -a
-        sudo /sbin/modprobe intel_sgx
+        sudo /sbin/modprobe intel_sgx || true
 
-        cd ..
+        cd "$dir"/..
+        rm -rf "$dir"
     fi
 }
 
@@ -902,14 +927,153 @@ function install_sgx_driver {
     fi
 }
 
+function check_commit {
+    local driver_version=$1
+    local driver_commit=$2
+
+    echo -n "Driver status: [ Checking for a newer version. Please wait... ]"
+
+    dir=$(mktemp -d)
+    cd "$dir"
+
+    if [[ $driver_version == "DCAP" ]]; then
+        git clone https://github.com/intel/SGXDataCenterAttestationPrimitives.git driver_source 2> /dev/null
+    else
+        git clone https://github.com/intel/linux-sgx-driver.git driver_source 2> /dev/null
+    fi
+    cd driver_source/
+    
+    local current_commit="$(git rev-parse HEAD)"
+
+    if [[ $current_commit == $driver_commit ]]; then
+        echo -e "\e[0K\rDriver status: Up to date                                      "
+    else
+        echo -e "\e[0K\rDriver status: Outdated - $(($(git rev-list --count $driver_commit..$current_commit) - 1)) new commit(s) available            "
+        update_needed=true
+    fi
+
+    cd ..
+    rm -rf "$dir"
+}
+
+# first argument: driver_type [OOT or DCAP]
+function check_patches {
+    local driver_version=$1
+
+    if [[ $metrics_ver != "0" ]]; then
+        echo -n "Patch 'metrics' version: $metrics_ver "
+
+        if [[ $driver_version == "DCAP" ]]; then
+            if [[ $metrics_ver == $dcap_metrics_patch_version ]]; then
+                echo "(Up to date)"
+            else
+                echo "(Outdated - $(($dcap_metrics_patch_version - $metrics_ver)) newer version(s) available)"
+                update_needed=true
+            fi
+        else
+            if [[ $metrics_ver == $oot_metrics_patch_version ]]; then
+                echo "(Up to date)"
+            else
+                echo "(Outdated - $(($oot_metrics_patch_version - $metrics_ver)) newer version(s) available)"
+                update_needed=true
+            fi
+        fi
+    else
+        if [[ $patch_metrics == "1" ]]; then
+            echo "Patch 'metrics' not found!"
+            update_needed=true
+        fi
+    fi
+
+    if [[ $page0_ver != "0" ]]; then
+        echo -n "Patch 'page0' version  : $page0_ver "
+
+        if [[ $page0_ver == $oot_page0_patch_version ]]; then
+            echo "(Up to date)"
+        else
+            echo "(Outdated - $(($oot_page0_patch_version - $page0_ver)) newer version(s) available)"
+            update_needed=true
+        fi
+    else
+        if [[ $patch_page0 == "1" && $driver_version == "OOT" ]]; then
+            echo "Patch 'page0' not found!"
+            update_needed=true
+        fi
+    fi
+}
+
+function describe {
+    driver_type=$1
+    module_path=$2
+
+    update_needed=false
+
+    echo -e "Getting SGX Driver information:\n"
+    echo "$driver_type driver detected."
+    echo -e "Version: $(cat $module_path/version)\n"
+
+    if [[ ! -e "$module_path/parameters/commit" ]]; then
+        msg_color "error"
+        echo "FAIL: Unable to detect 'version' patch! This patch is required for running this command."
+        msg_color "default"
+
+        echo -n "To install the driver with 'version' patch, run: ./install_sgx_driver.sh install -p version "
+
+        if [[ $driver_type == "DCAP" ]]; then
+            echo -n "--dcap "
+        fi
+
+        echo "--force"
+        
+        exit 1
+    else
+        driver_commit=$(cat "$module_path/parameters/commit")
+    fi
+
+    metrics_ver=$(cat $module_path/parameters/patch_metrics)
+    page0_ver=$(cat $module_path/parameters/patch_page0)
+
+    echo -n "Detected patches: version "
+
+    if [[ $metrics_ver != "0" ]]; then # check if a metric is exposed
+        echo -n "metrics "
+        metrics_ver=$(cat $module_path/parameters/patch_metrics)
+    fi
+
+    if [[ $page0_ver != "0" ]]; then # check if a metric is exposed
+        echo -n "page0 "
+        page0_ver=$(cat $module_path/parameters/patch_page0)
+    fi
+
+    echo -e "\n\nDriver commit: $driver_commit"
+    
+    check_commit $driver_type $driver_commit
+
+    echo
+
+    check_patches $driver_type 
+
+    if [[ $update_needed == true ]]; then
+        msg_color "warning"
+        echo "WARNING: Update is needed!"
+        msg_color "default"
+
+        exit 1
+    fi
+
+    exit 0
+}
+
 function show_help {
     echo -e \
 "Usage: install_sgx_driver.sh [COMMAND] [OPTIONS]...
 Helper script to install Intel SGX driver.\n
 The script supports the following commands:
+  check                checks the current SGX driver status
+                       (requires 'version' patch)
   install              installs the SGX driver
 
-The following options are supported:
+The following options are supported by 'install' command:
   -d, --dcap           install DCAP driver
 
   -p, --patch=[PATCH]  apply patches to the SGX driver. The valid values for PATCH
@@ -921,12 +1085,28 @@ The following options are supported:
   -l, --latest         installs the latest upstream driver (not recommended)
 
   -f, --force          replaces existing SGX driver, if installed
+
+The following options are supported by 'check' command:
+  -p, --patch=[PATCH]  check the status of patch on current installed driver.
+                       The valid values for PATCH are: 'metrics', 'page0'.
+      -p metrics       check the status of 'metrics' patch
+      -p page0         check the status of 'page0' patch (not available for DCAP)
+
+Note: In case of absence or outdated driver, or absence or outdated patch, this command
+will return error.
+
+The following options are supported by both commands:
   -h, --help           display this help and exit
 
 
-Usage example: to install the SGX driver with 'metrics' and 'page0' patches, run:
+Usage example 1: to install the SGX driver with 'metrics' and 'page0' patches, run:
 
 ./install_sgx_driver.sh install -p metrics -p page0
+
+Usage example 2: to check the status of driver installation and 'metrics' patch
+
+./install_sgx_driver.sh check -p metrics
+
 "
 
 #     -p performance  installs the performance patch - requires access to a deployment key
@@ -956,14 +1136,30 @@ function enable_patch {
     esac
 }
 
+function parse_command {
+    if [[ $1 != "install" &&\
+          $1 != "check" ]]; then
+          log_error "ERROR: '$1' command is not supported" >&2
+    fi
+}
+
 function parse_args {
     PARAMS=""
+
+    if [[ $# == 0 ]]; then
+        show_help
+    fi
 
     while (( "$#" )); do
     arg=$1
     case "$arg" in
         install)
-        arg_install=1
+        cmd_install=1
+        shift
+        ;;
+
+        check)
+        cmd_check=1
         shift
         ;;
 
@@ -992,7 +1188,7 @@ function parse_args {
 
         -p|--patch)
         if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
-            if [[ $arg_install != 1 ]]; then
+            if [[ $cmd_install != 1 && $cmd_check != 1 ]]; then
                 msg_color "error"
                 echo "ERROR: invalid arguments."
                 msg_color "default"
@@ -1029,12 +1225,28 @@ function parse_args {
 
 parse_args $@
 
-if [[ $arg_install == "1" ]]; then
+parse_command $1
+
+if [[ $cmd_install == "1" ]]; then
     if [[ -z $force_install ]]; then
         check_driver
     fi
     install_sgx_driver
     exit 0
+fi
+
+if [[ $cmd_check == "1" ]]; then
+    check_driver >/dev/null
+
+    if [[ $dcap_driver_found == true ]]; then
+        describe DCAP /sys/module/intel_sgx
+    fi
+    
+    if [[ $oot_driver_found == true ]]; then
+        describe OOT /sys/module/isgx
+    fi
+
+    log_error "FAIL: No SGX driver detected!"
 fi
 
 show_help
