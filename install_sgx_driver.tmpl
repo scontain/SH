@@ -29,22 +29,33 @@ Copyright (C) 2017-2018 scontain.com
 
 set -e
 
-version_patch_content=$(cat << 'VERSION_PATCH_EOF'
-${VERSION_PATCH_CONTENT}
+oot_version_patch_content=$(cat << 'VERSION_PATCH_EOF'
+${OOT_VERSION_PATCH_CONTENT}
 VERSION_PATCH_EOF
 )
 
-page0_patch_content=$(cat << 'PAGE0_PATCH_EOF'
-${PAGE0_PATCH_CONTENT}
+oot_page0_patch_content=$(cat << 'PAGE0_PATCH_EOF'
+${OOT_PAGE0_PATCH_CONTENT}
 PAGE0_PATCH_EOF
 )
 
-metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
-${METRICS_PATCH_CONTENT}
+oot_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
+${OOT_METRICS_PATCH_CONTENT}
 METRICS_PATCH_EOF
 )
 
-driver_commit="${COMMIT_SHA}"
+dcap_version_patch_content=$(cat << 'VERSION_PATCH_EOF'
+${DCAP_VERSION_PATCH_CONTENT}
+VERSION_PATCH_EOF
+)
+
+dcap_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
+${DCAP_METRICS_PATCH_CONTENT}
+METRICS_PATCH_EOF
+)
+
+oot_driver_commit="${OOT_COMMIT_SHA}"
+dcap_driver_commit="${DCAP_COMMIT_SHA}"
 
 # print the right color for each level
 #
@@ -103,11 +114,11 @@ function log_error
     exit 1
 }
 
-function check_driver {
+function check_oot_driver {
     if [[ ! -e /sys/module/isgx/version ]] ; then
-        install_driver=true
+        oot_driver_found=false
     else 
-        install_driver=false
+        oot_driver_found=true
         verbose "SGX-driver already installed."
         if [[ ! -e /dev/isgx ]] ; then
             log_error "SGX driver is installed but no SGX device - SGX not enabled?"
@@ -115,25 +126,48 @@ function check_driver {
     fi
 }
 
-function apply_patches {
+function check_dcap_driver {
+    if [[ ! -e /sys/module/intel_sgx/version ]] ; then
+        dcap_driver_found=false
+    else 
+        dcap_driver_found=true
+        verbose "DCAP SGX-driver already installed."
+        if [[ ! -e /dev/sgx ]] ; then
+            log_error "DCAP SGX driver is installed but no SGX device - SGX not enabled?"
+        fi
+    fi
+}
+
+function check_driver {
+    check_oot_driver
+    check_dcap_driver
+
+    if [[ $oot_driver_found == false && $dcap_driver_found == false ]]; then
+        install_driver=true
+    else
+        install_driver=false
+    fi
+}
+
+function apply_oot_patches {
     if [[ $patch_version == "1" ]]; then
         echo "Applying version patch..."
-        echo "$version_patch_content" | sed "s/COMMIT_SHA1SUM/$commit_sha/g" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+        echo "$oot_version_patch_content" | sed "s/COMMIT_SHA1SUM/$oot_commit_sha/g" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
     fi    
     if [[ $patch_metrics == "1" ]]; then
         echo "Applying metrics patch..."
-	echo "$metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+	echo "$oot_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
     fi
     if [[ $patch_page0 == "1" ]]; then
         echo "Applying page0 patch..."
-	echo "$page0_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+	echo "$oot_page0_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
     fi
 #    if [[ $patch_performance == "1" ]]; then
 #        echo "Applying performance patch..."
 #    fi
 }
 
-function install_sgx_driver {
+function install_oot_sgx_driver {
     if [[ $install_driver == true || $force_install ]] ; then
         dir=$(mktemp -d)
         cd "$dir"
@@ -143,14 +177,14 @@ function install_sgx_driver {
         cd linux-sgx-driver/
 
         if [ -z $install_latest ]; then
-            commit_sha=$driver_commit
-            git checkout $commit_sha
+            oot_commit_sha=$oot_driver_commit
+            git checkout $oot_commit_sha
         else
             git checkout master
-            commit_sha="$(git rev-parse HEAD)"
+            oot_commit_sha="$(git rev-parse HEAD)"
         fi
 
-        apply_patches
+        apply_oot_patches
 
         sudo apt-get update
         sudo apt-get install -y build-essential
@@ -169,6 +203,85 @@ function install_sgx_driver {
     fi
 }
 
+function apply_dcap_patches {
+    if [[ $patch_version == "1" ]]; then
+        echo "Applying version patch..."
+        echo "$dcap_version_patch_content" | sed "s/COMMIT_SHA1SUM/$dcap_commit_sha/g" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
+    fi    
+    if [[ $patch_metrics == "1" ]]; then
+        echo "Applying metrics patch..."
+	echo "$dcap_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
+    fi
+    if [[ $patch_page0 == "1" ]]; then
+        msg_color "warning"
+        verbose "WARNING: page0 patch is not available for DCAP installation"
+        msg_color "default"
+    fi
+#    if [[ $patch_performance == "1" ]]; then
+#        echo "Applying performance patch..."
+#    fi
+}
+
+function install_dcap_sgx_driver {
+    if [[ $install_driver == true || $force_install ]] ; then
+        dir=$(mktemp -d)
+        cd "$dir"
+        rm -rf SGXDataCenterAttestationPrimitives
+        git clone https://github.com/intel/SGXDataCenterAttestationPrimitives.git
+
+        cd SGXDataCenterAttestationPrimitives/driver/linux
+
+        if [ -z $install_latest ]; then
+            dcap_commit_sha=$dcap_driver_commit
+            git checkout $dcap_commit_sha
+        else
+            git checkout master
+            dcap_commit_sha="$(git rev-parse HEAD)"
+        fi
+
+        apply_dcap_patches
+
+        driver_ver=$(cat dkms.conf | grep PACKAGE_VERSION | cut -d'=' -f2 | sed 's/"//g')
+
+        if [[ ${#driver_ver} == 0 ]]; then
+            log_error "Unable to detect DCAP driver version!"
+        fi
+
+        sudo apt-get update
+        sudo apt-get install -y build-essential dkms linux-headers-$(uname -r)
+
+        sudo rm -rf /usr/src/sgx-$driver_ver
+        sudo mkdir -p /usr/src/sgx-$driver_ver
+
+        sudo cp -rf * /usr/src/sgx-$driver_ver/
+
+        sudo dkms remove sgx/$driver_ver --all --force || true
+        sudo dkms add -m sgx -v $driver_ver
+        sudo dkms build -m sgx -v $driver_ver
+        sudo dkms install -m sgx -v $driver_ver
+        
+
+        sudo cp 10-sgx.rules /etc/udev/rules.d
+        sudo groupadd -f sgx_prv
+        sudo udevadm trigger
+
+        sudo sh -c "cat /etc/modules | grep -Fxq intel_sgx || echo intel_sgx >> /etc/modules"
+
+        sudo /sbin/depmod -a
+        sudo /sbin/modprobe intel_sgx
+
+        cd ..
+    fi
+}
+
+function install_sgx_driver {
+    if [[ $install_dcap == "1" ]]; then
+        install_dcap_sgx_driver
+    else
+        install_oot_sgx_driver
+    fi
+}
+
 function show_help {
     echo -e \
 "Usage: install_sgx_driver.sh [COMMAND] [OPTIONS]...
@@ -177,11 +290,13 @@ The script supports the following commands:
   install              installs the SGX driver
 
 The following options are supported:
+  -d, --dcap           install DCAP driver
+
   -p, --patch=[PATCH]  apply patches to the SGX driver. The valid values for PATCH
                        are: 'version', 'metrics', 'page0'.
       -p version       installs the version patch
       -p metrics       installs the metrics patch
-      -p page0         installs the page0 patch
+      -p page0         installs the page0 patch (not available for DCAP)
 
   -l, --latest         installs the latest upstream driver (not recommended)
 
@@ -229,6 +344,11 @@ function parse_args {
     case "$arg" in
         install)
         arg_install=1
+        shift
+        ;;
+
+        -d|--dcap)
+        install_dcap=1
         shift
         ;;
 
