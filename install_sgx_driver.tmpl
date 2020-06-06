@@ -29,15 +29,39 @@ Copyright (C) 2017-2018 scontain.com
 
 set -e
 
-page0_patch_content=$(cat << 'PAGE0_PATCH_EOF'
-${PAGE0_PATCH_CONTENT}
-PAGE0_PATCH_EOF
-)
-
-metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
-${METRICS_PATCH_CONTENT}
+# OOT Patches
+oot_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
+${OOT_METRICS_PATCH_CONTENT}
 METRICS_PATCH_EOF
 )
+oot_metrics_patch_version=${OOT_METRICS_PATCH_VERSION}
+
+oot_page0_patch_content=$(cat << 'PAGE0_PATCH_EOF'
+${OOT_PAGE0_PATCH_CONTENT}
+PAGE0_PATCH_EOF
+)
+oot_page0_patch_version=${OOT_PAGE0_PATCH_VERSION}
+
+oot_version_patch_content=$(cat << 'VERSION_PATCH_EOF'
+${OOT_VERSION_PATCH_CONTENT}
+VERSION_PATCH_EOF
+)
+
+# DCAP Patches
+dcap_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
+${DCAP_METRICS_PATCH_CONTENT}
+METRICS_PATCH_EOF
+)
+dcap_metrics_patch_version=${DCAP_METRICS_PATCH_VERSION}
+
+dcap_version_patch_content=$(cat << 'VERSION_PATCH_EOF'
+${DCAP_VERSION_PATCH_CONTENT}
+VERSION_PATCH_EOF
+)
+
+# OOT & DCAP Commits
+oot_driver_commit="${OOT_COMMIT_SHA}"
+dcap_driver_commit="${DCAP_COMMIT_SHA}"
 
 # print the right color for each level
 #
@@ -96,11 +120,11 @@ function log_error
     exit 1
 }
 
-function check_driver {
+function check_oot_driver {
     if [[ ! -e /sys/module/isgx/version ]] ; then
-        install_driver=true
+        oot_driver_found=false
     else 
-        install_driver=false
+        oot_driver_found=true
         verbose "SGX-driver already installed."
         if [[ ! -e /dev/isgx ]] ; then
             log_error "SGX driver is installed but no SGX device - SGX not enabled?"
@@ -108,113 +132,448 @@ function check_driver {
     fi
 }
 
-function apply_patches {
+function check_dcap_driver {
+    if [[ ! -e /sys/module/intel_sgx/version ]] ; then
+        dcap_driver_found=false
+    else 
+        dcap_driver_found=true
+        verbose "DCAP SGX-driver already installed."
+        if [[ ! -e /dev/sgx ]] ; then
+            log_error "DCAP SGX driver is installed but no SGX device - SGX not enabled?"
+        fi
+    fi
+}
+
+function check_driver {
+    check_oot_driver
+    check_dcap_driver
+
+    if [[ $oot_driver_found == false && $dcap_driver_found == false ]]; then
+        install_driver=true
+    else
+        install_driver=false
+    fi
+}
+
+function install_common_dependencies {
+    msg_color "info"
+    echo "INFO: Installing dependencies... "
+    msg_color "default"
     
+    sudo apt-get update > /dev/null && \
+    sudo apt-get install -y build-essential git patch linux-headers-$(uname -r) > /dev/null
+
+    msg_color "info"
+    echo "INFO: Done!"
+    msg_color "default"
+}
+
+function apply_oot_patches {
+    if [[ $patch_version == "1" ]]; then
+        echo "Applying version patch..."
+        echo "$oot_version_patch_content" | sed "s/COMMIT_SHA1SUM/$oot_commit_sha/g" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+    fi    
     if [[ $patch_metrics == "1" ]]; then
         echo "Applying metrics patch..."
-	echo "$metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+	echo "$oot_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
     fi
     if [[ $patch_page0 == "1" ]]; then
         echo "Applying page0 patch..."
-	echo "$page0_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+	echo "$oot_page0_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
     fi
 #    if [[ $patch_performance == "1" ]]; then
 #        echo "Applying performance patch..."
 #    fi
 }
 
-function install_sgx_driver {
-    commit_sha=${COMMIT_SHA}
+function install_oot_sgx_driver {
     if [[ $install_driver == true || $force_install ]] ; then
+        install_common_dependencies
+
         dir=$(mktemp -d)
         cd "$dir"
-        rm -rf linux-sgx-driver
-        git clone https://github.com/intel/linux-sgx-driver.git
+        git clone ${OOT_REPOSITORY} driver_source
 
-        cd linux-sgx-driver/
-        git checkout $commit_sha
+        cd driver_source/
 
-        apply_patches
+        if [ -z $install_latest ]; then
+            oot_commit_sha=$oot_driver_commit
+            git checkout $oot_commit_sha
+        else
+            git checkout master
+            oot_commit_sha="$(git rev-parse HEAD)"
+        fi
 
-        sudo apt-get update
-        sudo apt-get install -y build-essential
-        sudo apt-get install -y linux-headers-$(uname -r)
+        apply_oot_patches
 
         make 
 
-        sudo mkdir -p "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"    
-        sudo cp -f isgx.ko "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"    
+        sudo mkdir -p "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"
+        sudo cp -f isgx.ko "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"
 
-        sudo sh -c "cat /etc/modules | grep -Fxq isgx || echo isgx >> /etc/modules"    
+        sudo sh -c "cat /etc/modules | grep -Fxq isgx || echo isgx >> /etc/modules"
         sudo /sbin/depmod
-        sudo /sbin/modprobe isgx
+        sudo /sbin/modprobe isgx || true
 
-        cd ..
+        cd "$dir"/..
+        rm -rf "$dir"
     fi
+}
+
+function apply_dcap_patches {
+    if [[ $patch_version == "1" ]]; then
+        echo "Applying version patch..."
+        echo "$dcap_version_patch_content" | sed "s/COMMIT_SHA1SUM/$dcap_commit_sha/g" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
+    fi    
+    if [[ $patch_metrics == "1" ]]; then
+        echo "Applying metrics patch..."
+	echo "$dcap_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
+    fi
+    if [[ $patch_page0 == "1" ]]; then
+        msg_color "warning"
+        verbose "WARNING: page0 patch is not available for DCAP installation"
+        msg_color "default"
+    fi
+#    if [[ $patch_performance == "1" ]]; then
+#        echo "Applying performance patch..."
+#    fi
+}
+
+function install_dcap_sgx_driver {
+    if [[ $install_driver == true || $force_install ]] ; then
+        install_common_dependencies
+
+        msg_color "info"
+        echo -n "INFO: Installing DKMS... "
+
+        sudo apt-get install -y dkms > /dev/null
+
+        echo "Done!"
+
+        msg_color "default"
+
+        dir=$(mktemp -d)
+        cd "$dir"
+        git clone ${DCAP_REPOSITORY} driver_source
+
+        cd driver_source/driver/linux
+
+        if [ -z $install_latest ]; then
+            dcap_commit_sha=$dcap_driver_commit
+            git checkout $dcap_commit_sha
+        else
+            git checkout master
+            dcap_commit_sha="$(git rev-parse HEAD)"
+        fi
+
+        apply_dcap_patches
+
+        driver_ver=$(cat dkms.conf | grep PACKAGE_VERSION | cut -d'=' -f2 | sed 's/"//g')
+
+        if [[ ${#driver_ver} == 0 ]]; then
+            log_error "Unable to detect DCAP driver version!"
+        fi
+
+        sudo rm -rf /usr/src/sgx-$driver_ver
+        sudo mkdir -p /usr/src/sgx-$driver_ver
+
+        sudo cp -rf * /usr/src/sgx-$driver_ver/
+
+        sudo dkms remove sgx/$driver_ver --all --force || true
+        sudo dkms add -m sgx -v $driver_ver --force
+        sudo dkms build -m sgx -v $driver_ver --force
+        sudo dkms install -m sgx -v $driver_ver --force
+
+        sudo cp 10-sgx.rules /etc/udev/rules.d
+        sudo groupadd -f sgx_prv
+        sudo udevadm trigger
+
+        sudo sh -c "cat /etc/modules | grep -Fxq intel_sgx || echo intel_sgx >> /etc/modules"
+
+        sudo /sbin/depmod -a
+        sudo /sbin/modprobe intel_sgx || true
+
+        cd "$dir"/..
+        rm -rf "$dir"
+    fi
+}
+
+function install_sgx_driver {
+    if [[ $install_dcap == "1" ]]; then
+        install_dcap_sgx_driver
+    else
+        install_oot_sgx_driver
+    fi
+}
+
+function check_commit {
+    local driver_version=$1
+    local driver_commit=$2
+
+    echo -n "Driver status: [ Checking for a newer version. Please wait... ]"
+
+    dir=$(mktemp -d)
+    cd "$dir"
+
+    if [[ $driver_version == "DCAP" ]]; then
+        git clone ${DCAP_REPOSITORY} driver_source 2> /dev/null
+    else
+        git clone ${OOT_REPOSITORY} driver_source 2> /dev/null
+    fi
+    cd driver_source/
+    
+    local current_commit="$(git rev-parse HEAD)"
+
+    if [[ $current_commit == $driver_commit ]]; then
+        echo -e "\e[0K\rDriver status: Up to date                                      "
+    else
+        echo -e "\e[0K\rDriver status: Outdated - $(($(git rev-list --count $driver_commit..$current_commit) - 1)) new commit(s) available            "
+        update_needed=true
+    fi
+
+    cd ..
+    rm -rf "$dir"
+}
+
+# first argument: driver_type [OOT or DCAP]
+function check_patches {
+    local driver_version=$1
+
+    if [[ $metrics_ver != "0" ]]; then
+        echo -n "Patch 'metrics' version: $metrics_ver "
+
+        if [[ $driver_version == "DCAP" ]]; then
+            if [[ $metrics_ver == $dcap_metrics_patch_version ]]; then
+                echo "(Up to date)"
+            else
+                echo "(Outdated - $(($dcap_metrics_patch_version - $metrics_ver)) newer version(s) available)"
+                update_needed=true
+            fi
+        else
+            if [[ $metrics_ver == $oot_metrics_patch_version ]]; then
+                echo "(Up to date)"
+            else
+                echo "(Outdated - $(($oot_metrics_patch_version - $metrics_ver)) newer version(s) available)"
+                update_needed=true
+            fi
+        fi
+    else
+        if [[ $patch_metrics == "1" ]]; then
+            echo "Patch 'metrics' not found!"
+            update_needed=true
+        fi
+    fi
+
+    if [[ $page0_ver != "0" ]]; then
+        echo -n "Patch 'page0' version  : $page0_ver "
+
+        if [[ $page0_ver == $oot_page0_patch_version ]]; then
+            echo "(Up to date)"
+        else
+            echo "(Outdated - $(($oot_page0_patch_version - $page0_ver)) newer version(s) available)"
+            update_needed=true
+        fi
+    else
+        if [[ $patch_page0 == "1" && $driver_version == "OOT" ]]; then
+            echo "Patch 'page0' not found!"
+            update_needed=true
+        fi
+    fi
+}
+
+function describe {
+    driver_type=$1
+    module_path=$2
+
+    update_needed=false
+
+    echo -e "Getting SGX Driver information:\n"
+    echo "$driver_type driver detected."
+    echo -e "Version: $(cat $module_path/version)\n"
+
+    if [[ ! -e "$module_path/parameters/commit" ]]; then
+        msg_color "error"
+        echo "FAIL: Unable to detect 'version' patch! This patch is required for running this command."
+        msg_color "default"
+
+        echo -n "To install the driver with 'version' patch, run: ./install_sgx_driver.sh install -p version "
+
+        if [[ $driver_type == "DCAP" ]]; then
+            echo -n "--dcap "
+        fi
+
+        echo "--force"
+        
+        exit 1
+    else
+        driver_commit=$(cat "$module_path/parameters/commit")
+    fi
+
+    metrics_ver=$(cat $module_path/parameters/patch_metrics)
+    page0_ver=$(cat $module_path/parameters/patch_page0)
+
+    echo -n "Detected patches: version "
+
+    if [[ $metrics_ver != "0" ]]; then # check if a metric is exposed
+        echo -n "metrics "
+        metrics_ver=$(cat $module_path/parameters/patch_metrics)
+    fi
+
+    if [[ $page0_ver != "0" ]]; then # check if a metric is exposed
+        echo -n "page0 "
+        page0_ver=$(cat $module_path/parameters/patch_page0)
+    fi
+
+    echo -e "\n\nDriver commit: $driver_commit"
+    
+    check_commit $driver_type $driver_commit
+
+    echo
+
+    check_patches $driver_type 
+
+    if [[ $update_needed == true ]]; then
+        msg_color "warning"
+        echo "WARNING: Update is needed!"
+        msg_color "default"
+
+        exit 1
+    fi
+
+    exit 0
 }
 
 function show_help {
     echo -e \
-"Usage: install_sgx_driver.sh [OPTION]...
+"Usage: install_sgx_driver.sh [COMMAND] [OPTIONS]...
 Helper script to install Intel SGX driver.\n
 The script supports the following commands:
-  help     display this help and exit
-  install  installs the current Intel out of branch driver if not SGX driver is installed
-      -p metrics      installs the metrics patch
-      -p page0        installs the page0 patch
-  force   same as 'install' but will replace existing SGX driver (if installed)"
+  check                checks the current SGX driver status
+                       (requires 'version' patch)
+  install              installs the SGX driver
+
+The following options are supported by 'install' command:
+  -d, --dcap           install DCAP driver
+
+  -p, --patch=[PATCH]  apply patches to the SGX driver. The valid values for PATCH
+                       are: 'version', 'metrics', 'page0'.
+      -p version       installs the version patch
+      -p metrics       installs the metrics patch
+      -p page0         installs the page0 patch (not available for DCAP)
+
+  -l, --latest         installs the latest upstream driver (not recommended)
+
+  -f, --force          replaces existing SGX driver, if installed
+
+The following options are supported by 'check' command:
+  -p, --patch=[PATCH]  check the status of patch on current installed driver.
+                       The valid values for PATCH are: 'metrics', 'page0'.
+      -p metrics       check the status of 'metrics' patch
+      -p page0         check the status of 'page0' patch (not available for DCAP)
+
+Note: In case of absence or outdated driver, or absence or outdated patch, this command
+will return error.
+
+The following options are supported by both commands:
+  -h, --help           display this help and exit
+
+
+Usage example 1: to install the SGX driver with 'metrics' and 'page0' patches, run:
+
+./install_sgx_driver.sh install -p metrics -p page0
+
+Usage example 2: to check the status of driver installation and 'metrics' patch
+
+./install_sgx_driver.sh check -p metrics
+
+"
+
 #     -p performance  installs the performance patch - requires access to a deployment key
 
     exit 0
 }
 
+function enable_patch {
+    case "$1" in
+        version)
+        patch_version=1
+        ;;
+
+        metrics)
+        patch_metrics=1
+        ;;
+
+        page0)
+        patch_page0=1
+        ;;
+
+        *)
+        msg_color "error"
+        echo "ERROR: patch '$1' is not supported" >&2
+        msg_color "default"
+        exit 1
+    esac
+}
+
+function parse_command {
+    if [[ $1 != "install" &&\
+          $1 != "check" ]]; then
+          log_error "ERROR: '$1' command is not supported" >&2
+    fi
+}
+
 function parse_args {
     PARAMS=""
 
+    if [[ $# == 0 ]]; then
+        show_help
+    fi
+
     while (( "$#" )); do
-    case "$1" in
-        help)
+    arg=$1
+    case "$arg" in
+        install)
+        cmd_install=1
+        shift
+        ;;
+
+        check)
+        cmd_check=1
+        shift
+        ;;
+
+        -d|--dcap)
+        install_dcap=1
+        shift
+        ;;
+
+        -h|--help)
         show_help
         shift
         ;;
 
-        force)
+        -f|--force)
         force_install=1
         shift
         ;;
 
-        install)
-        arg_install=1
+        -l|--latest)
+        msg_color "warning"
+        echo "WARNING: the installation of latest upstream driver is not recommended."
+        msg_color "default"
+        install_latest=1
         shift
         ;;
 
-        -p)
+        -p|--patch)
         if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
-	    if [[ $force_install != 1 && $arg_install != 1 ]]; then
+            if [[ $cmd_install != 1 && $cmd_check != 1 ]]; then
                 msg_color "error"
-                "ERROR: invalid arguments."
+                echo "ERROR: invalid arguments."
                 msg_color "default"
                 show_help
             fi
-            case "$2" in
-                metrics)
-                patch_metrics=1
-                ;;
-
-                page0)
-                patch_page0=1
-                ;;
-
-                performance)
-                patch_performance=1
-                ;;
-
-                *)
-                msg_color "error"
-                echo "ERROR: patch '$2' is not supported" >&2
-                msg_color "default"
-                exit 1
-            esac
+            enable_patch $2
             shift 2
         else
             msg_color "error"
@@ -222,6 +581,12 @@ function parse_args {
             msg_color "default"
             exit 1
         fi
+        ;;
+
+        --patch=*)
+        echo "${i#*=}"
+        enable_patch "${1#*=}"
+        shift
         ;;
 
         *) # preserve positional arguments
@@ -239,15 +604,28 @@ function parse_args {
 
 parse_args $@
 
-if [[ $force_install == "1" ]]; then
+parse_command $1
+
+if [[ $cmd_install == "1" ]]; then
+    if [[ -z $force_install ]]; then
+        check_driver
+    fi
     install_sgx_driver
     exit 0
 fi
 
-if [[ $arg_install == "1" ]]; then
-    check_driver
-    install_sgx_driver
-    exit 0
+if [[ $cmd_check == "1" ]]; then
+    check_driver >/dev/null
+
+    if [[ $dcap_driver_found == true ]]; then
+        describe DCAP /sys/module/intel_sgx
+    fi
+    
+    if [[ $oot_driver_found == true ]]; then
+        describe OOT /sys/module/isgx
+    fi
+
+    log_error "FAIL: No SGX driver detected!"
 fi
 
 show_help

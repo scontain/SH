@@ -1,18 +1,32 @@
-From 9e41fb97ee9cbf4ab6298e77448552a25a25dd72 Mon Sep 17 00:00:00 2001
+From 25330b3c753a8314d95b379ed807fdb4302c8526 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
 Date: Thu, 21 May 2020 14:21:29 -0300
-Subject: [PATCH 1/2] Add performance counters
+Subject: [PATCH 1/1] Add performance counters
 
 ---
+ sgx.h            |  2 ++
  sgx_encl.c       | 15 +++++++++++++++
  sgx_page_cache.c | 19 +++++++++++++++++++
- sgx_util.c       |  6 ++++++
+ sgx_util.c       |  7 +++++++
  show_values.sh   | 22 ++++++++++++++++++++++
- 4 files changed, 62 insertions(+)
+ 5 files changed, 65 insertions(+)
  create mode 100755 show_values.sh
 
+diff --git a/sgx.h b/sgx.h
+index 590464d..37295bf 100644
+--- a/sgx.h
++++ b/sgx.h
+@@ -80,6 +80,8 @@
+ 
+ #define SGX_VA_SLOT_COUNT 512
+ 
++#define PATCH_METRICS 2
++
+ struct sgx_epc_page {
+ 	resource_size_t	pa;
+ 	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
-index a03c30a..980a536 100644
+index 6815c43..071c5bd 100644
 --- a/sgx_encl.c
 +++ b/sgx_encl.c
 @@ -73,6 +73,14 @@
@@ -39,7 +53,7 @@ index a03c30a..980a536 100644
  	return ret;
  }
  
-@@ -668,6 +678,8 @@ int sgx_encl_create(struct sgx_secs *secs)
+@@ -663,6 +673,8 @@ int sgx_encl_create(struct sgx_secs *secs)
  	list_add_tail(&encl->encl_list, &encl->tgid_ctx->encl_list);
  	mutex_unlock(&sgx_tgid_ctx_mutex);
  
@@ -48,7 +62,7 @@ index a03c30a..980a536 100644
  	return 0;
  out:
  	if (encl)
-@@ -953,6 +965,8 @@ int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
+@@ -948,6 +960,8 @@ int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
  	}
  
  	encl->flags |= SGX_ENCL_INITIALIZED;
@@ -57,14 +71,14 @@ index a03c30a..980a536 100644
  	return 0;
  }
  
-@@ -1004,4 +1018,5 @@ void sgx_encl_release(struct kref *ref)
+@@ -999,4 +1013,5 @@ void sgx_encl_release(struct kref *ref)
  		fput(encl->pcmd);
  
  	kfree(encl);
 +	sgx_nr_enclaves--;
  }
 diff --git a/sgx_page_cache.c b/sgx_page_cache.c
-index ed7c6be..82d16de 100644
+index 3770ad4..d1aebf9 100644
 --- a/sgx_page_cache.c
 +++ b/sgx_page_cache.c
 @@ -69,6 +69,7 @@
@@ -99,8 +113,8 @@ index ed7c6be..82d16de 100644
 +
  static int sgx_test_and_clear_young_cb(pte_t *ptep,
  #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 3, 0))
- 		pgtable_t token,
-@@ -98,6 +112,7 @@ static int sgx_test_and_clear_young_cb(pte_t *ptep,
+     #if( defined(RHEL_RELEASE_VERSION) && defined(RHEL_RELEASE_CODE))
+@@ -104,6 +118,7 @@ static int sgx_test_and_clear_young_cb(pte_t *ptep,
  	ret = pte_young(*ptep);
  	if (ret) {
  		pte = pte_mkold(*ptep);
@@ -108,7 +122,7 @@ index ed7c6be..82d16de 100644
  		set_pte_at((struct mm_struct *)data, addr, ptep, pte);
  	}
  
-@@ -308,6 +323,7 @@ static bool sgx_ewb(struct sgx_encl *encl,
+@@ -314,6 +329,7 @@ static bool sgx_ewb(struct sgx_encl *encl,
  static void sgx_evict_page(struct sgx_encl_page *entry,
  			   struct sgx_encl *encl)
  {
@@ -116,7 +130,7 @@ index ed7c6be..82d16de 100644
  	sgx_ewb(encl, entry);
  	sgx_free_page(entry->epc_page, encl);
  	entry->epc_page = NULL;
-@@ -346,11 +362,13 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
+@@ -352,11 +368,13 @@ static void sgx_write_pages(struct sgx_encl *encl, struct list_head *src)
  		list_del(&entry->list);
  		sgx_evict_page(entry->encl_page, encl);
  		encl->secs_child_cnt--;
@@ -130,7 +144,7 @@ index ed7c6be..82d16de 100644
  	}
  
  	mutex_unlock(&encl->lock);
-@@ -520,6 +538,7 @@ struct sgx_epc_page *sgx_alloc_page(unsigned int flags)
+@@ -526,6 +544,7 @@ struct sgx_epc_page *sgx_alloc_page(unsigned int flags)
  		schedule();
  	}
  
@@ -139,10 +153,10 @@ index ed7c6be..82d16de 100644
  		wake_up(&ksgxswapd_waitq);
  
 diff --git a/sgx_util.c b/sgx_util.c
-index 25b18a9..af40961 100644
+index 38013e2..681ef43 100644
 --- a/sgx_util.c
 +++ b/sgx_util.c
-@@ -66,6 +66,10 @@
+@@ -66,6 +66,11 @@
  #else
  	#include <linux/mm.h>
  #endif
@@ -150,10 +164,11 @@ index 25b18a9..af40961 100644
 +
 +static unsigned int sgx_loaded_back;
 +module_param(sgx_loaded_back, uint, 0440);
- 
- struct page *sgx_get_backing(struct sgx_encl *encl,
- 			     struct sgx_encl_page *entry,
-@@ -195,6 +199,8 @@ int sgx_eldu(struct sgx_encl *encl,
++
+ int sgx_vm_insert_pfn(struct vm_area_struct *vma, unsigned long addr, resource_size_t pa)
+ {
+ 	int rc;
+@@ -220,6 +225,8 @@ int sgx_eldu(struct sgx_encl *encl,
  		ret = -EFAULT;
  	}
  
