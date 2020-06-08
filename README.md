@@ -20,9 +20,11 @@ The following options are supported by 'install' command:
 
   -p, --patch=[PATCH]  apply patches to the SGX driver. The valid values for PATCH
                        are: 'version', 'metrics', 'page0'.
-      -p version       installs the version patch
+      -p version       installs the version patch (recommended)
       -p metrics       installs the metrics patch
       -p page0         installs the page0 patch (not available for DCAP)
+
+  -k, --dkms           installs the driver with DKMS (default for DCAP)
 
   -l, --latest         installs the latest upstream driver (not recommended)
 
