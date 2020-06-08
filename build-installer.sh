@@ -10,6 +10,7 @@ export OOT_PAGE0_PATCH_CONTENT=$(cat patches/oot-page0.patch | sed 's/\\$/\\@!-t
 export OOT_PAGE0_PATCH_VERSION=1
 
 export OOT_VERSION_PATCH_CONTENT=$(cat patches/oot-version.patch | sed 's/\\$/\\@!-tbs-!@/g')
+export OOT_DKMS_PATCH_CONTENT=$(cat patches/oot-dkms.patch | sed 's/\\$/\\@!-tbs-!@/g')
 export OOT_COMMIT_SHA="602374c738ca58f83a1c17574d08e5d5e6341953"
 
 # DCAP
@@ -29,6 +30,7 @@ envsubst < install_sgx_driver.tmpl '\
     ${OOT_PAGE0_PATCH_CONTENT},\
     ${OOT_PAGE0_PATCH_VERSION},\
     ${OOT_VERSION_PATCH_CONTENT},\
+    ${OOT_DKMS_PATCH_CONTENT},\
     ${DCAP_REPOSITORY},\
     ${DCAP_METRICS_PATCH_CONTENT},\
     ${DCAP_METRICS_PATCH_VERSION},\
