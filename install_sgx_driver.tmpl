@@ -120,6 +120,18 @@ function log_error
     exit 1
 }
 
+function load_module {
+    local mod_name=$1
+
+    msg_color "warning"
+
+    (sudo lsmod | grep $mod_name > /dev/null) && (sudo rmmod $mod_name 2> /dev/null || echo "WARNING: Unable to unload currently loaded '$mod_name' module. Please, reload '$mod_name' manually to changes take effect.")
+
+    sudo modprobe $mod_name 2> /dev/null || echo "WARNING: Unable to load '$mod_name' module. Please, check if SGX is available on your system and enabled on BIOS."
+
+    msg_color "default"
+}
+
 function check_oot_driver {
     if [[ ! -e /sys/module/isgx/version ]] ; then
         oot_driver_found=false
@@ -212,8 +224,9 @@ function install_oot_sgx_driver {
         sudo cp -f isgx.ko "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"
 
         sudo sh -c "cat /etc/modules | grep -Fxq isgx || echo isgx >> /etc/modules"
-        sudo /sbin/depmod
-        sudo /sbin/modprobe isgx || true
+        sudo /sbin/depmod -a
+
+        load_module isgx
 
         cd "$dir"/..
         rm -rf "$dir"
@@ -291,7 +304,8 @@ function install_dcap_sgx_driver {
         sudo sh -c "cat /etc/modules | grep -Fxq intel_sgx || echo intel_sgx >> /etc/modules"
 
         sudo /sbin/depmod -a
-        sudo /sbin/modprobe intel_sgx || true
+
+        load_module intel_sgx
 
         cd "$dir"/..
         rm -rf "$dir"
