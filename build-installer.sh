@@ -10,7 +10,7 @@ export OOT_PAGE0_PATCH_CONTENT=$(cat patches/oot-page0.patch | sed 's/\\$/\\@!-t
 export OOT_PAGE0_PATCH_VERSION=1
 
 export OOT_VERSION_PATCH_CONTENT=$(cat patches/oot-version.patch | sed 's/\\$/\\@!-tbs-!@/g')
-export OOT_COMMIT_SHA="7acda57e771d49d9e2142059b346b778349f653a"
+export OOT_COMMIT_SHA="602374c738ca58f83a1c17574d08e5d5e6341953"
 
 # DCAP
 export DCAP_REPOSITORY="https://github.com/intel/SGXDataCenterAttestationPrimitives.git"

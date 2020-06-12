@@ -681,7 +681,7 @@ VERSION_PATCH_EOF
 )
 
 # OOT & DCAP Commits
-oot_driver_commit="7acda57e771d49d9e2142059b346b778349f653a"
+oot_driver_commit="602374c738ca58f83a1c17574d08e5d5e6341953"
 dcap_driver_commit="bfa5d8f6935238c170324cac482b04650d2db4ac"
 
 # print the right color for each level
