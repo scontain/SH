@@ -14,7 +14,9 @@ The script supports the following commands:
   install              installs the SGX driver
 
 The following options are supported by 'install' command:
-  -d, --dcap           install DCAP driver
+  -d, --dcap           installs the DCAP driver
+
+  -a, --auto           select the driver according to the machine capabilities (DCAP or OOT)
 
   -p, --patch=[PATCH]  apply patches to the SGX driver. The valid values for PATCH
                        are: 'version', 'metrics', 'page0'.
