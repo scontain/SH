@@ -457,6 +457,48 @@ function describe {
     exit 0
 }
 
+function check_sgx {
+    msg_color "info"
+    echo -n "INFO: Checking CPU capabilities..."
+    msg_color "default"
+
+    cpuid_cmd=$(which cpuid || true)
+
+    if [ -z $cpuid_cmd ]; then
+        msg_color "info"
+        echo -n "INFO: 'cpuid' not found! Installing CPUID... "
+
+        sudo apt-get update > /dev/null && \
+        sudo apt-get install -y cpuid > /dev/null
+
+        echo "Done!"
+        msg_color "default"
+
+        cpuid_cmd=$(which cpuid)
+    fi
+
+    cpuid_leaf7_val=$($cpuid_cmd -r -1  | grep "$(printf '0x%08x 0x00:' "$((0x07))")" || true)
+    cpuid_leaf12_val=$($cpuid_cmd -r -1  | grep "$(printf '0x%08x 0x00:' "$((0x12))")" || true)
+
+    l7_ebx=$(echo $cpuid_leaf7_val | awk '{split($4,ebx,"="); print ebx[2]}')
+    l7_ecx=$(echo $cpuid_leaf7_val | awk '{split($5,ecx,"="); print ecx[2]}')
+
+    l12_eax=$(echo $cpuid_leaf12_val | awk '{split($3,eax,"="); print eax[2]}')
+
+    sgx="$((l7_ebx >> 2 & 1))"
+    dcap="$((l7_ecx >> 30 & 1))"
+
+    if [[ $sgx != "1" ]]; then
+        # SGX is not supported
+        log_error "ERROR: SGX is not supported!"
+    fi
+
+    if [[ $dcap == "1" ]]; then
+        # enable dcap
+        install_dcap=1
+    fi
+}
+
 function show_help {
     echo -e \
 "Usage: install_sgx_driver.sh [COMMAND] [OPTIONS]...
@@ -467,7 +509,9 @@ The script supports the following commands:
   install              installs the SGX driver
 
 The following options are supported by 'install' command:
-  -d, --dcap           install DCAP driver
+  -d, --dcap           installs the DCAP driver
+
+  -a, --auto           select the driver according to the machine capabilities (DCAP or OOT)
 
   -p, --patch=[PATCH]  apply patches to the SGX driver. The valid values for PATCH
                        are: 'version', 'metrics', 'page0'.
@@ -531,8 +575,8 @@ function enable_patch {
 
 function parse_command {
     if [[ $1 != "install" &&\
-          $1 != "check" ]]; then
-          log_error "ERROR: '$1' command is not supported" >&2
+        $1 != "check" ]]; then
+        log_error "ERROR: '$1' command is not supported." >&2
     fi
 }
 
@@ -553,6 +597,11 @@ function parse_args {
 
         check)
         cmd_check=1
+        shift
+        ;;
+
+        -a|--auto)
+        cmd_check_sgx=1
         shift
         ;;
 
@@ -623,6 +672,10 @@ parse_command $1
 if [[ $cmd_install == "1" ]]; then
     if [[ -z $force_install ]]; then
         check_driver
+    fi
+
+    if [[ $cmd_check_sgx == "1" ]]; then
+        check_sgx
     fi
     install_sgx_driver
     exit 0
