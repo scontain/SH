@@ -1,0 +1,25 @@
+From 790ece1bb65375806fb6b66ac61fd911cc0ab011 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
+Date: Mon, 8 Jun 2020 10:28:27 -0300
+Subject: [PATCH 1/1] Add DKMS configuration file
+
+---
+ dkms.conf | 6 ++++++
+ 1 file changed, 6 insertions(+)
+ create mode 100644 dkms.conf
+
+diff --git a/dkms.conf b/dkms.conf
+new file mode 100644
+index 0000000..9c03f4a
+--- /dev/null
++++ b/dkms.conf
+@@ -0,0 +1,6 @@
++PACKAGE_NAME="isgx"
++PACKAGE_VERSION="2.6.0"
++BUILT_MODULE_NAME[0]="isgx"
++DEST_MODULE_LOCATION[0]="/kernel/drivers/intel/sgx"
++AUTOINSTALL="yes"
++MAKE[0]="'make'  KDIR=/lib/modules/${kernelver}/build"
+-- 
+2.25.1
+

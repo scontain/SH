@@ -384,6 +384,34 @@ index 170dc8a..ffd3a39 100644
 VERSION_PATCH_EOF
 )
 
+oot_dkms_patch_content=$(cat << 'DKMS_PATCH_EOF'
+From 790ece1bb65375806fb6b66ac61fd911cc0ab011 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
+Date: Mon, 8 Jun 2020 10:28:27 -0300
+Subject: [PATCH 1/1] Add DKMS configuration file
+
+---
+ dkms.conf | 6 ++++++
+ 1 file changed, 6 insertions(+)
+ create mode 100644 dkms.conf
+
+diff --git a/dkms.conf b/dkms.conf
+new file mode 100644
+index 0000000..9c03f4a
+--- /dev/null
++++ b/dkms.conf
+@@ -0,0 +1,6 @@
++PACKAGE_NAME="isgx"
++PACKAGE_VERSION="2.6.0"
++BUILT_MODULE_NAME[0]="isgx"
++DEST_MODULE_LOCATION[0]="/kernel/drivers/intel/sgx"
++AUTOINSTALL="yes"
++MAKE[0]="'make'  KDIR=/lib/modules/${kernelver}/build"
+-- 
+2.25.1
+DKMS_PATCH_EOF
+)
+
 # DCAP Patches
 dcap_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
 From 17575a61a2667b20c1984b39014583811d83e5cf Mon Sep 17 00:00:00 2001
@@ -801,11 +829,36 @@ function install_common_dependencies {
     msg_color "default"
 }
 
+function install_dkms {
+    msg_color "info"
+    echo -n "INFO: Installing DKMS... "
+
+    sudo apt-get update > /dev/null && \
+    sudo apt-get install -y dkms > /dev/null
+
+    echo "Done!"
+
+    msg_color "default"
+}
+
+function remove_dkms_driver {
+    dkms_cmd="$(which dkms || true)"
+    if [ ! -z $dkms_cmd ]; then
+        for installed_ver in $(sudo $dkms_cmd status $1 | cut -d',' -f2 | sed 's/ //g'); do
+            sudo $dkms_cmd remove $1/$installed_ver --all
+        done
+    fi
+}
+
 function apply_oot_patches {
+    if [[ $use_dkms == "1" ]]; then
+        echo "Applying DKMS patch..."
+        echo "$oot_dkms_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+    fi
     if [[ $patch_version == "1" ]]; then
         echo "Applying version patch..."
         echo "$oot_version_patch_content" | sed "s/COMMIT_SHA1SUM/$oot_commit_sha/g" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
-    fi    
+    fi
     if [[ $patch_metrics == "1" ]]; then
         echo "Applying metrics patch..."
 	echo "$oot_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
@@ -837,12 +890,39 @@ function install_oot_sgx_driver {
             oot_commit_sha="$(git rev-parse HEAD)"
         fi
 
+        remove_dkms_driver isgx
+
         apply_oot_patches
 
-        make 
+        if [[ -f "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx/isgx.ko" ]]; then
+            msg_color "info"
+            echo "INFO: Removing \"/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx/isgx.ko\" ... "
+            sudo rm -rf "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx/isgx.ko"
+            msg_color "default"
+        fi
 
-        sudo mkdir -p "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"
-        sudo cp -f isgx.ko "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"
+        if [[ $use_dkms == "1" ]]; then
+            install_dkms
+
+            driver_ver=$(cat dkms.conf | grep PACKAGE_VERSION | cut -d'=' -f2 | sed 's/"//g')
+
+            if [[ ${#driver_ver} == 0 ]]; then
+                log_error "Unable to detect OOT driver version!"
+            fi
+
+            sudo rm -rf /usr/src/isgx-$driver_ver
+            sudo mkdir -p /usr/src/isgx-$driver_ver
+
+            sudo cp -rf * /usr/src/isgx-$driver_ver/
+
+            sudo dkms add -m isgx -v $driver_ver --force
+            sudo dkms build -m isgx -v $driver_ver --force
+            sudo dkms install -m isgx -v $driver_ver --force
+        else
+            make
+            sudo mkdir -p "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"
+            sudo cp -f isgx.ko "/lib/modules/"`uname -r`"/kernel/drivers/intel/sgx"
+        fi
 
         sudo sh -c "cat /etc/modules | grep -Fxq isgx || echo isgx >> /etc/modules"
         sudo /sbin/depmod -a
@@ -877,14 +957,7 @@ function install_dcap_sgx_driver {
     if [[ $install_driver == true || $force_install ]] ; then
         install_common_dependencies
 
-        msg_color "info"
-        echo -n "INFO: Installing DKMS... "
-
-        sudo apt-get install -y dkms > /dev/null
-
-        echo "Done!"
-
-        msg_color "default"
+        install_dkms
 
         dir=$(mktemp -d)
         cd "$dir"
@@ -913,7 +986,7 @@ function install_dcap_sgx_driver {
 
         sudo cp -rf * /usr/src/sgx-$driver_ver/
 
-        sudo dkms remove sgx/$driver_ver --all --force || true
+        remove_dkms_driver sgx
         sudo dkms add -m sgx -v $driver_ver --force
         sudo dkms build -m sgx -v $driver_ver --force
         sudo dkms install -m sgx -v $driver_ver --force
@@ -945,6 +1018,8 @@ function check_commit {
     local driver_version=$1
     local driver_commit=$2
 
+    echo -e "Driver commit: $driver_commit"
+
     echo -n "Driver status: [ Checking for a newer version. Please wait... ]"
 
     dir=$(mktemp -d)
@@ -966,8 +1041,26 @@ function check_commit {
         update_needed=true
     fi
 
-    cd ..
+    cd "$dir"/..
     rm -rf "$dir"
+}
+
+# first argument: driver_type [OOT or DCAP]
+function check_dkms {
+    local driver_version=$1
+    
+    echo -n "Use DKMS: "
+
+    dkms_cmd="$(which dkms || true)"
+    if [ -z $dkms_cmd ]; then
+        echo "No"
+    else
+        if [[ $driver_version == "OOT" ]]; then
+            (($dkms_cmd status isgx | grep installed > /dev/null) && echo "Yes") || echo "No"
+        else # DCAP always use DKMS
+            echo "Yes"
+        fi
+    fi
 }
 
 # first argument: driver_type [OOT or DCAP]
@@ -1059,8 +1152,12 @@ function describe {
         page0_ver=$(cat $module_path/parameters/patch_page0)
     fi
 
-    echo -e "\n\nDriver commit: $driver_commit"
-    
+    echo -ne "\n\n"
+
+    check_dkms $driver_type
+
+    echo
+ 
     check_commit $driver_type $driver_commit
 
     echo
@@ -1136,9 +1233,11 @@ The following options are supported by 'install' command:
 
   -p, --patch=[PATCH]  apply patches to the SGX driver. The valid values for PATCH
                        are: 'version', 'metrics', 'page0'.
-      -p version       installs the version patch
+      -p version       installs the version patch (recommended)
       -p metrics       installs the metrics patch
       -p page0         installs the page0 patch (not available for DCAP)
+
+  -k, --dkms           installs the driver with DKMS (default for DCAP)
 
   -l, --latest         installs the latest upstream driver (not recommended)
 
@@ -1223,6 +1322,11 @@ function parse_args {
 
         -a|--auto)
         cmd_check_sgx=1
+        shift
+        ;;
+
+        -k|--dkms)
+        use_dkms=1
         shift
         ;;
 
