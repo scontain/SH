@@ -201,7 +201,7 @@ function remove_dkms_driver {
     dkms_cmd="$(which dkms || true)"
     if [ ! -z $dkms_cmd ]; then
         for installed_ver in $(sudo $dkms_cmd status $1 | cut -d',' -f2 | sed 's/ //g'); do
-            sudo $dkms_cmd remove $1/$installed_ver --all
+            sudo $dkms_cmd remove $1/$installed_ver --all || true
         done
     fi
 }
@@ -532,44 +532,46 @@ function describe {
 }
 
 function check_sgx {
-    msg_color "info"
-    echo -n "INFO: Checking CPU capabilities..."
-    msg_color "default"
-
-    cpuid_cmd=$(which cpuid || true)
-
-    if [ -z $cpuid_cmd ]; then
+    if [[ $install_driver == true || $force_install ]] ; then
         msg_color "info"
-        echo -n "INFO: 'cpuid' not found! Installing CPUID... "
-
-        sudo apt-get update > /dev/null && \
-        sudo apt-get install -y cpuid > /dev/null
-
-        echo "Done!"
+        echo -n "INFO: Checking CPU capabilities..."
         msg_color "default"
 
-        cpuid_cmd=$(which cpuid)
-    fi
+        cpuid_cmd=$(which cpuid || true)
 
-    cpuid_leaf7_val=$($cpuid_cmd -r -1  | grep "$(printf '0x%08x 0x00:' "$((0x07))")" || true)
-    cpuid_leaf12_val=$($cpuid_cmd -r -1  | grep "$(printf '0x%08x 0x00:' "$((0x12))")" || true)
+        if [ -z $cpuid_cmd ]; then
+            msg_color "info"
+            echo -n "INFO: 'cpuid' not found! Installing CPUID... "
 
-    l7_ebx=$(echo $cpuid_leaf7_val | awk '{split($4,ebx,"="); print ebx[2]}')
-    l7_ecx=$(echo $cpuid_leaf7_val | awk '{split($5,ecx,"="); print ecx[2]}')
+            sudo apt-get update > /dev/null && \
+            sudo apt-get install -y cpuid > /dev/null
 
-    l12_eax=$(echo $cpuid_leaf12_val | awk '{split($3,eax,"="); print eax[2]}')
+            echo "Done!"
+            msg_color "default"
 
-    sgx="$((l7_ebx >> 2 & 1))"
-    dcap="$((l7_ecx >> 30 & 1))"
+            cpuid_cmd=$(which cpuid)
+        fi
 
-    if [[ $sgx != "1" ]]; then
-        # SGX is not supported
-        log_error "ERROR: SGX is not supported!"
-    fi
+        cpuid_leaf7_val=$($cpuid_cmd -r -1  | grep "$(printf '0x%08x 0x00:' "$((0x07))")" || true)
+        cpuid_leaf12_val=$($cpuid_cmd -r -1  | grep "$(printf '0x%08x 0x00:' "$((0x12))")" || true)
 
-    if [[ $dcap == "1" ]]; then
-        # enable dcap
-        install_dcap=1
+        l7_ebx=$(echo $cpuid_leaf7_val | awk '{split($4,ebx,"="); print ebx[2]}')
+        l7_ecx=$(echo $cpuid_leaf7_val | awk '{split($5,ecx,"="); print ecx[2]}')
+
+        l12_eax=$(echo $cpuid_leaf12_val | awk '{split($3,eax,"="); print eax[2]}')
+
+        sgx="$((l7_ebx >> 2 & 1))"
+        dcap="$((l7_ecx >> 30 & 1))"
+
+        if [[ $sgx != "1" ]]; then
+            # SGX is not supported
+            log_error "ERROR: SGX is not supported!"
+        fi
+
+        if [[ $dcap == "1" ]]; then
+            # enable dcap
+            install_dcap=1
+        fi
     fi
 }
 
