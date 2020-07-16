@@ -1,19 +1,19 @@
-From d40b7b1025402f26f1b51afb92698764b4b16614 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
-Date: Thu, 4 Jun 2020 18:24:35 -0300
+From 8188ffd534b7d32755a8d6b088a5e63b0bfb593f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
+Date: Wed, 15 Jul 2020 17:46:54 -0300
 Subject: [PATCH 1/1] Export patch information
 
 ---
- driver/linux/main.c | 28 ++++++++++++++++++++++++++++
- 1 file changed, 28 insertions(+)
+ driver/linux/sgx_main.c | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
 
-diff --git a/driver/linux/main.c b/driver/linux/main.c
-index 82c7b77..36b4cdd 100644
---- a/driver/linux/main.c
-+++ b/driver/linux/main.c
-@@ -25,6 +25,34 @@
- struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
- int sgx_nr_epc_sections;
+diff --git a/driver/linux/sgx_main.c b/driver/linux/sgx_main.c
+index 9f3a1ea..d29e352 100644
+--- a/driver/linux/sgx_main.c
++++ b/driver/linux/sgx_main.c
+@@ -85,6 +85,33 @@ u64 sgx_xfrm_mask = 0x3;
+ u32 sgx_misc_reserved;
+ u32 sgx_xsave_size_tbl[64];
  
 +/*
 + * Patch versions
@@ -42,10 +42,9 @@ index 82c7b77..36b4cdd 100644
 +module_param(patch_metrics, uint, 0444);
 +module_param(dcap, uint, 0444);
 +module_param_string(commit, commit, COMMIT_SHA_LEN, 0444);
-+
- // Based on arch/x86/kernel/cpu/intel.c
- static bool detect_sgx(struct cpuinfo_x86 *c)
- {
+ 
+ // From intel_sgx.c
+ bool sgx_enabled = false;
 -- 
 2.25.1
 

@@ -373,32 +373,34 @@ function install_sgx_driver {
 function check_commit {
     local driver_version=$1
     local driver_commit=$2
+    if [[ $driver_version != "DCAP" ]]; then
 
-    echo -e "Driver commit: $driver_commit"
+        echo -e "Driver commit: $driver_commit"
 
-    echo -n "Driver status: [ Checking for a newer version. Please wait... ]"
+        echo -n "Driver status: [ Checking for a newer version. Please wait... ]"
 
-    dir=$(mktemp -d)
-    cd "$dir"
+        dir=$(mktemp -d)
+        cd "$dir"
 
-    if [[ $driver_version == "DCAP" ]]; then
-        git clone ${DCAP_REPOSITORY} driver_source 2> /dev/null
-    else
-        git clone ${OOT_REPOSITORY} driver_source 2> /dev/null
+        if [[ $driver_version == "DCAP" ]]; then
+            git clone ${DCAP_REPOSITORY} driver_source 2> /dev/null
+        else
+            git clone ${OOT_REPOSITORY} driver_source 2> /dev/null
+        fi
+        cd driver_source/
+        
+        local current_commit="$(git rev-parse HEAD)"
+
+        if [[ $current_commit == $driver_commit ]]; then
+            echo -e "\e[0K\rDriver status: Up to date                                      "
+        else
+            echo -e "\e[0K\rDriver status: Outdated - $(($(git rev-list --count $driver_commit..$current_commit) - 1)) new commit(s) available            "
+            update_needed=true
+        fi
+
+        cd "$dir"/..
+        rm -rf "$dir"
     fi
-    cd driver_source/
-    
-    local current_commit="$(git rev-parse HEAD)"
-
-    if [[ $current_commit == $driver_commit ]]; then
-        echo -e "\e[0K\rDriver status: Up to date                                      "
-    else
-        echo -e "\e[0K\rDriver status: Outdated - $(($(git rev-list --count $driver_commit..$current_commit) - 1)) new commit(s) available            "
-        update_needed=true
-    fi
-
-    cd "$dir"/..
-    rm -rf "$dir"
 }
 
 # first argument: driver_type [OOT or DCAP]

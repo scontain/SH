@@ -1,55 +1,102 @@
-From 17575a61a2667b20c1984b39014583811d83e5cf Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
-Date: Thu, 4 Jun 2020 15:47:09 -0300
+From ca1642a0f13d25feaa227c8c5d5a9f1f9b39ee0a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
+Date: Wed, 15 Jul 2020 23:15:51 -0300
 Subject: [PATCH 1/1] Add performance counters
 
 ---
- driver/linux/driver.h       |  2 ++
- driver/linux/encl.c         | 29 +++++++++++++++++++++++++++++
- driver/linux/ioctl.c        | 11 +++++++++++
- driver/linux/main.c         |  8 ++++++++
- driver/linux/reclaim.c      |  8 ++++++++
- driver/linux/show_values.sh | 23 +++++++++++++++++++++++
- 6 files changed, 81 insertions(+)
+ driver/linux/sgx_encl.c       | 12 ++++++++++++
+ driver/linux/sgx_page_cache.c | 34 +++++++++++++++++++++++++++++++++-
+ driver/linux/sgx_util.c       |  7 +++++++
+ driver/linux/show_values.sh   | 23 +++++++++++++++++++++++
+ 4 files changed, 75 insertions(+), 1 deletion(-)
  create mode 100755 driver/linux/show_values.sh
 
-diff --git a/driver/linux/driver.h b/driver/linux/driver.h
-index c90e132..c47fd79 100644
---- a/driver/linux/driver.h
-+++ b/driver/linux/driver.h
-@@ -12,6 +12,8 @@
- #include "uapi/asm/sgx_oot.h"
+diff --git a/driver/linux/sgx_encl.c b/driver/linux/sgx_encl.c
+index dfbd77d..fa81501 100644
+--- a/driver/linux/sgx_encl.c
++++ b/driver/linux/sgx_encl.c
+@@ -69,7 +69,14 @@
+ #include <linux/slab.h>
  #include "sgx.h"
- 
-+#define PATCH_METRICS 1
-+
- #define SGX_EINIT_SPIN_COUNT	20
- #define SGX_EINIT_SLEEP_COUNT	50
- #define SGX_EINIT_SLEEP_TIME	20
-diff --git a/driver/linux/encl.c b/driver/linux/encl.c
-index 96f90a1..b2cd62b 100644
---- a/driver/linux/encl.c
-+++ b/driver/linux/encl.c
-@@ -14,6 +14,29 @@
- #include "dcap.h"
- 
- #include <linux/version.h>
+ #include "sgx_wl.h"
 +#include <linux/moduleparam.h>
+ 
++static unsigned int sgx_init_enclaves = 0;
++static unsigned int sgx_nr_enclaves = 0;
++static unsigned int sgx_nr_added_pages = 0;
++module_param(sgx_init_enclaves, uint, 0440);
++module_param(sgx_nr_enclaves, uint, 0440);
++module_param(sgx_nr_added_pages, uint, 0440);
+ 
+ struct sgx_add_page_req {
+ 	struct sgx_encl *encl;
+@@ -589,6 +596,8 @@ int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
+ 	list_add_tail(&encl->encl_list, &sgx_encl_list);
+ 	mutex_unlock(&sgx_encl_list_lock);
+ 
++	sgx_nr_enclaves++;
 +
-+extern unsigned int sgx_nr_enclaves;
+ 	return 0;
+ }
+ 
+@@ -754,6 +763,7 @@ static int __sgx_encl_add_page(struct sgx_encl *encl,
+ 	sgx_put_backing(backing, true /* write */);
+ 
+ 	mutex_unlock(&encl->lock);
++	sgx_nr_added_pages++;
+ 	return 0;
+ out:
+ 	kfree(req);
+@@ -921,6 +931,7 @@ int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
+ 	}
+ 
+ 	encl->flags |= SGX_ENCL_INITIALIZED;
++	sgx_init_enclaves++;
+ 	return 0;
+ }
+ 
+@@ -970,5 +981,6 @@ void sgx_encl_release(struct kref *ref)
+ 	if (encl->pcmd)
+ 		fput(encl->pcmd);
+ 
++	sgx_nr_enclaves--;
+ 	kfree(encl);
+ }
+diff --git a/driver/linux/sgx_page_cache.c b/driver/linux/sgx_page_cache.c
+index 751893d..f149914 100644
+--- a/driver/linux/sgx_page_cache.c
++++ b/driver/linux/sgx_page_cache.c
+@@ -65,6 +65,7 @@
+ #include <linux/sched/signal.h>
+ #include <linux/slab.h>
+ #include "sgx.h"
++#include <linux/moduleparam.h>
+ 
+ #define SGX_NR_LOW_PAGES 32
+ #define SGX_NR_HIGH_PAGES 64
+@@ -90,6 +91,33 @@ static atomic_t sgx_nr_free_pages = ATOMIC_INIT(0);
+ static struct task_struct *ksgxswapd_tsk;
+ static DECLARE_WAIT_QUEUE_HEAD(ksgxswapd_waitq);
+ 
++static unsigned int sgx_nr_reclaimed = 0;
++static unsigned int sgx_nr_evicted = 0;
 +static unsigned int sgx_nr_low_pages = SGX_NR_LOW_PAGES;
 +static unsigned int sgx_nr_high_pages = SGX_NR_HIGH_PAGES;
-+static unsigned int sgx_loaded_back = 0;
 +static unsigned int sgx_nr_marked_old = 0;
++static unsigned int sgx_nr_alloc_pages = 0;
 +
++module_param(sgx_nr_reclaimed, uint, 0440);
++module_param(sgx_nr_evicted, uint, 0440);
 +module_param(sgx_nr_low_pages, uint, 0440);
 +module_param(sgx_nr_high_pages, uint, 0440);
-+module_param(sgx_loaded_back, uint, 0440);
 +module_param(sgx_nr_marked_old, uint, 0440);
++module_param(sgx_nr_alloc_pages, uint, 0440);
++module_param_named(sgx_nr_epc_sections, sgx_nr_epc_banks, int, 0440);
++module_param_named(sgx_nr_total_epc_pages, sgx_nr_total_pages, uint, 0440);
 +
 +static int get_sgx_nr_free_pages(char *buffer, const struct kernel_param *kp)
 +{
-+	return sprintf(buffer, "%lu\n", sgx_nr_free_pages());
++	return sprintf(buffer, "%d\n", atomic_read(&sgx_nr_free_pages));
 +}
 +
 +static struct kernel_param_ops param_ops_sgx_nr_free_pages = {
@@ -57,29 +104,11 @@ index 96f90a1..b2cd62b 100644
 +};
 +
 +module_param_cb(sgx_nr_free_pages, &param_ops_sgx_nr_free_pages, NULL, 0440);
- 
- static int __sgx_encl_eldu(struct sgx_encl_page *encl_page,
- 			   struct sgx_epc_page *epc_page,
-@@ -54,6 +77,8 @@ static int __sgx_encl_eldu(struct sgx_encl_page *encl_page,
- 		ret = -EFAULT;
- 	}
- 
-+	sgx_loaded_back++;
 +
- 	kunmap_atomic((void *)(unsigned long)(pginfo.metadata - b.pcmd_offset));
- 	kunmap_atomic((void *)(unsigned long)pginfo.contents);
- 
-@@ -604,6 +629,9 @@ void sgx_encl_release(struct kref *ref)
- {
- 	struct sgx_encl *encl = container_of(ref, struct sgx_encl, refcount);
- 
-+	if (atomic_read(&encl->flags) & SGX_ENCL_CREATED)
-+		sgx_nr_enclaves--;
-+
- 	sgx_encl_destroy(encl);
- 
- 	if (encl->backing)
-@@ -702,6 +730,7 @@ static int sgx_encl_test_and_clear_young_cb(pte_t *ptep,
+ static int sgx_test_and_clear_young_cb(pte_t *ptep,
+ #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 3, 0))
+ 				pgtable_t token,
+@@ -102,6 +130,7 @@ static int sgx_test_and_clear_young_cb(pte_t *ptep,
  	ret = pte_young(*ptep);
  	if (ret) {
  		pte = pte_mkold(*ptep);
@@ -87,122 +116,62 @@ index 96f90a1..b2cd62b 100644
  		set_pte_at((struct mm_struct *)data, addr, ptep, pte);
  	}
  
-diff --git a/driver/linux/ioctl.c b/driver/linux/ioctl.c
-index 79b8c80..ce7bf47 100644
---- a/driver/linux/ioctl.c
-+++ b/driver/linux/ioctl.c
-@@ -18,6 +18,14 @@
- 
- #include <linux/version.h>
- #include "sgx_wl.h"
-+#include <linux/moduleparam.h>
-+
-+unsigned int sgx_init_enclaves = 0;
-+unsigned int sgx_nr_enclaves = 0;
-+unsigned int sgx_nr_added_pages = 0;
-+module_param(sgx_init_enclaves, uint, 0440);
-+module_param(sgx_nr_enclaves, uint, 0440);
-+module_param(sgx_nr_added_pages, uint, 0440);
- 
- /* A per-cpu cache for the last known values of IA32_SGXLEPUBKEYHASHx MSRs. */
- static DEFINE_PER_CPU(u64 [4], sgx_lepubkeyhash_cache);
-@@ -223,6 +231,7 @@ static int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
- 	 */
- 	atomic_or(SGX_ENCL_CREATED, &encl->flags);
- 
-+	sgx_nr_enclaves++;
- 	return 0;
- 
- err_out:
-@@ -344,6 +353,7 @@ static int __sgx_encl_add_page(struct sgx_encl *encl,
- 	kunmap_atomic((void *)pginfo.contents);
- 	put_page(src_page);
- 
-+	sgx_nr_added_pages++;
- 	return ret ? -EIO : 0;
- }
- 
-@@ -690,6 +700,7 @@ static int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
- 		ret = -EPERM;
- 	} else {
- 		atomic_or(SGX_ENCL_INITIALIZED, &encl->flags);
-+		sgx_init_enclaves++;
+@@ -309,7 +338,7 @@ static void sgx_ewb(struct sgx_encl *encl, struct sgx_encl_page *entry)
+ 			sgx_err(encl, "EWB returned %d, enclave invalidated\n",
+ 				ret);
+ 	}
+-
++	sgx_nr_evicted++;
+ 	sgx_free_page(entry->epc_page, encl);
+ 	entry->desc |= va_offset;
+ 	entry->va_page = va_page;
+@@ -330,11 +359,13 @@ static void sgx_write_pages(struct sgx_encl *encl,
+ 	for ( ; *cluster; cluster++) {
+ 		sgx_ewb(encl, *cluster);
+ 		encl->secs_child_cnt--;
++		sgx_nr_reclaimed++;
  	}
  
- err_out:
-diff --git a/driver/linux/main.c b/driver/linux/main.c
-index 82c7b77..b2e830b 100644
---- a/driver/linux/main.c
-+++ b/driver/linux/main.c
-@@ -14,6 +14,7 @@
- #include <linux/module.h>
- #include "version.h"
- #include "dcap.h"
-+#include <linux/moduleparam.h>
- #ifndef MSR_IA32_FEAT_CTL
- #define MSR_IA32_FEAT_CTL MSR_IA32_FEATURE_CONTROL
- #endif
-@@ -24,6 +25,11 @@
+ 	if (!encl->secs_child_cnt && (encl->flags & SGX_ENCL_INITIALIZED)) {
+ 		sgx_ewb(encl, &encl->secs);
+ 		encl->flags |= SGX_ENCL_SECS_EVICTED;
++		sgx_nr_reclaimed++;
+ 	}
  
- struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
- int sgx_nr_epc_sections;
-+static unsigned int sgx_nr_total_epc_pages = 0;
-+static unsigned int sgx_nr_alloc_pages = 0;
-+module_param(sgx_nr_epc_sections, int, 0440);
-+module_param(sgx_nr_total_epc_pages, uint, 0440);
-+module_param(sgx_nr_alloc_pages, uint, 0440);
- 
- // Based on arch/x86/kernel/cpu/intel.c
- static bool detect_sgx(struct cpuinfo_x86 *c)
-@@ -136,6 +142,7 @@ struct sgx_epc_page *sgx_alloc_page(void *owner, bool reclaim)
+ 	mutex_unlock(&encl->lock);
+@@ -541,6 +572,7 @@ void *sgx_alloc_page(unsigned int flags)
  		schedule();
  	}
  
-+	sgx_nr_alloc_pages++; // ignore races..
- 	if (sgx_should_reclaim(SGX_NR_LOW_PAGES))
++	sgx_nr_alloc_pages++;
+ 	if (atomic_read(&sgx_nr_free_pages) < SGX_NR_LOW_PAGES)
  		wake_up(&ksgxswapd_waitq);
  
-@@ -280,6 +287,7 @@ static bool __init sgx_page_cache_init(void)
- 		}
- 
- 		sgx_nr_epc_sections++;
-+		sgx_nr_total_epc_pages += (size / PAGE_SIZE);
- 	}
- 
- 	if (!sgx_nr_epc_sections) {
-diff --git a/driver/linux/reclaim.c b/driver/linux/reclaim.c
-index 99ada88..99e41f6 100644
---- a/driver/linux/reclaim.c
-+++ b/driver/linux/reclaim.c
-@@ -14,6 +14,12 @@
- #include "driver.h"
- 
- #include <linux/version.h>
+diff --git a/driver/linux/sgx_util.c b/driver/linux/sgx_util.c
+index 4ff8b13..245f3ac 100644
+--- a/driver/linux/sgx_util.c
++++ b/driver/linux/sgx_util.c
+@@ -61,6 +61,11 @@
+ #include <linux/sched/mm.h>
+ #include <linux/shmem_fs.h>
+ #include "sgx.h"
 +#include <linux/moduleparam.h>
 +
-+static unsigned int sgx_nr_reclaimed = 0;
-+static unsigned int sgx_nr_evicted = 0;
-+module_param(sgx_nr_reclaimed, uint, 0440);
-+module_param(sgx_nr_evicted, uint, 0440);
++static unsigned int sgx_loaded_back = 0;
++
++module_param(sgx_loaded_back, uint, 0440);
  
- struct task_struct *ksgxswapd_tsk;
- DECLARE_WAIT_QUEUE_HEAD(ksgxswapd_waitq);
-@@ -398,6 +404,7 @@ static void sgx_reclaimer_write(struct sgx_epc_page *epc_page,
- 			if (ret)
- 				goto out;
+ struct page *sgx_get_backing(struct sgx_encl *encl,
+ 			     struct sgx_encl_page *entry,
+@@ -189,6 +194,8 @@ static int sgx_eldu(struct sgx_encl *encl,
+ 		ret = -EFAULT;
+ 	}
  
-+			sgx_nr_evicted++;  // races are acceptable..
- 			sgx_encl_ewb(encl->secs.epc_page, &secs_backing);
- 
- 			sgx_free_page(encl->secs.epc_page);
-@@ -465,6 +472,7 @@ void sgx_reclaim_pages(void)
- 
- 		mutex_lock(&encl_page->encl->lock);
- 		encl_page->desc |= SGX_ENCL_PAGE_RECLAIMED;
-+		sgx_nr_reclaimed++;
- 		mutex_unlock(&encl_page->encl->lock);
- 		continue;
- 
++	sgx_loaded_back++;
++
+ 	kunmap_atomic((void *)(unsigned long)(pginfo.pcmd - pcmd_offset));
+ 	kunmap_atomic((void *)(unsigned long)pginfo.srcpge);
+ 	sgx_put_page(va_ptr);
 diff --git a/driver/linux/show_values.sh b/driver/linux/show_values.sh
 new file mode 100755
 index 0000000..af9e2d8
