@@ -31,10 +31,10 @@ set -e
 
 # OOT Patches
 oot_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
-From 25330b3c753a8314d95b379ed807fdb4302c8526 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
-Date: Thu, 21 May 2020 14:21:29 -0300
-Subject: [PATCH 1/1] Add performance counters
+From c2bfeee6b7462f2ece98090c2487cb5f3a566f5a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
+Date: Wed, 2 Sep 2020 14:28:23 -0300
+Subject: [PATCH] Add metrics extension
 
 ---
  sgx.h            |  2 ++
@@ -59,7 +59,7 @@ index 590464d..37295bf 100644
  	resource_size_t	pa;
  	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
-index 6815c43..071c5bd 100644
+index 44439c8..7dc89b6 100644
 --- a/sgx_encl.c
 +++ b/sgx_encl.c
 @@ -73,6 +73,14 @@
@@ -245,10 +245,10 @@ METRICS_PATCH_EOF
 oot_metrics_patch_version=2
 
 oot_page0_patch_content=$(cat << 'PAGE0_PATCH_EOF'
-From 4edf6bc51ff79a251de62adbd69ac6062c6f71e4 Mon Sep 17 00:00:00 2001
-From: Chia-Che Tsai <chiache@tamu.edu>
-Date: Fri, 17 May 2019 15:08:49 -0500
-Subject: [PATCH 1/1] Enabling mmap for address unaligned to the enclave range
+From b68890eb2d44b1abc66dfb43edfd501e114558f1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
+Date: Wed, 2 Sep 2020 14:23:33 -0300
+Subject: [PATCH] Add page0 extension
 
 ---
  sgx.h      | 2 ++
@@ -257,7 +257,7 @@ Subject: [PATCH 1/1] Enabling mmap for address unaligned to the enclave range
  3 files changed, 9 insertions(+), 5 deletions(-)
 
 diff --git a/sgx.h b/sgx.h
-index 46dfc0f..47758b5 100644
+index 590464d..3b81645 100644
 --- a/sgx.h
 +++ b/sgx.h
 @@ -80,6 +80,8 @@
@@ -270,10 +270,10 @@ index 46dfc0f..47758b5 100644
  	resource_size_t	pa;
  	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
-index a03c30a..24c0fc4 100644
+index 44439c8..60709d7 100644
 --- a/sgx_encl.c
 +++ b/sgx_encl.c
-@@ -645,7 +645,7 @@ int sgx_encl_create(struct sgx_secs *secs)
+@@ -640,7 +640,7 @@ int sgx_encl_create(struct sgx_secs *secs)
  	}
  
  	down_read(&current->mm->mmap_sem);
@@ -282,7 +282,7 @@ index a03c30a..24c0fc4 100644
  	if (ret != -ENOENT) {
  		if (!ret)
  			ret = -EINVAL;
-@@ -653,8 +653,9 @@ int sgx_encl_create(struct sgx_secs *secs)
+@@ -648,8 +648,9 @@ int sgx_encl_create(struct sgx_secs *secs)
  		goto out;
  	}
  
@@ -295,10 +295,10 @@ index a03c30a..24c0fc4 100644
  		ret = -EINVAL;
  		up_read(&current->mm->mmap_sem);
 diff --git a/sgx_main.c b/sgx_main.c
-index 170dc8a..69a6f53 100644
+index 0c93635..8f982b3 100644
 --- a/sgx_main.c
 +++ b/sgx_main.c
-@@ -128,7 +128,7 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
+@@ -121,7 +121,7 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
  					   unsigned long pgoff,
  					   unsigned long flags)
  {
@@ -307,7 +307,7 @@ index 170dc8a..69a6f53 100644
  		return -EINVAL;
  
  	/* On 64-bit architecture, allow mmap() to exceed 32-bit encl
-@@ -153,7 +153,8 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
+@@ -146,7 +146,8 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
  	if (IS_ERR_VALUE(addr))
  		return addr;
  
@@ -324,17 +324,17 @@ PAGE0_PATCH_EOF
 oot_page0_patch_version=1
 
 oot_version_patch_content=$(cat << 'VERSION_PATCH_EOF'
-From 403cb32324acaebafdf0258774b8171670fb7680 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
-Date: Mon, 1 Jun 2020 12:28:02 -0300
-Subject: [PATCH 1/1] Export patch information
+From 1038144bfea3b3535346e9953801e7226719c8e4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
+Date: Wed, 2 Sep 2020 14:19:08 -0300
+Subject: [PATCH] Add version extension
 
 ---
- sgx_main.c | 28 ++++++++++++++++++++++++++++
- 1 file changed, 28 insertions(+)
+ sgx_main.c | 44 ++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 40 insertions(+), 4 deletions(-)
 
 diff --git a/sgx_main.c b/sgx_main.c
-index 170dc8a..ffd3a39 100644
+index 0c93635..ffd3a39 100644
 --- a/sgx_main.c
 +++ b/sgx_main.c
 @@ -70,6 +70,7 @@
@@ -345,7 +345,7 @@ index 170dc8a..ffd3a39 100644
  
  #define DRV_DESCRIPTION "Intel SGX Driver"
  #define DRV_VERSION "2.6.0"
-@@ -106,6 +107,33 @@ u32 sgx_misc_reserved;
+@@ -106,6 +107,40 @@ u32 sgx_misc_reserved;
  u32 sgx_xsave_size_tbl[64];
  bool sgx_has_sgx2;
  
@@ -376,19 +376,59 @@ index 170dc8a..ffd3a39 100644
 +module_param_string(commit, commit, COMMIT_SHA_LEN, 0444);
 +
 +
- #ifdef CONFIG_COMPAT
- long sgx_compat_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
++#ifdef CONFIG_COMPAT
++long sgx_compat_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
++{
++	return sgx_ioctl(filep, cmd, arg);
++}
++#endif
++
+ static int sgx_mmap(struct file *file, struct vm_area_struct *vma)
  {
+ 	vma->vm_ops = &sgx_vm_ops;
+@@ -155,7 +190,7 @@ static const struct file_operations sgx_fops = {
+ 	.owner			= THIS_MODULE,
+ 	.unlocked_ioctl		= sgx_ioctl,
+ #ifdef CONFIG_COMPAT
+-	.compat_ioctl		= sgx_ioctl,
++	.compat_ioctl		= sgx_compat_ioctl,
+ #endif
+ 	.mmap			= sgx_mmap,
+ 	.get_unmapped_area	= sgx_get_unmapped_area,
+@@ -261,7 +296,7 @@ static int sgx_dev_init(struct device *parent)
+ 	if (!sgx_add_page_wq) {
+ 		pr_err("intel_sgx: alloc_workqueue() failed\n");
+ 		ret = -ENOMEM;
+-		goto out_page_cache;
++		goto out_iounmap;
+ 	}
+ 
+ 	sgx_dev.parent = parent;
+@@ -271,11 +306,12 @@ static int sgx_dev_init(struct device *parent)
+ 		goto out_workqueue;
+ 	}
+ 
++	if (ret)
++		goto out_workqueue;
++
+ 	return 0;
+ out_workqueue:
+ 	destroy_workqueue(sgx_add_page_wq);
+-out_page_cache:
+-	sgx_page_cache_teardown();
+ out_iounmap:
+ #ifdef CONFIG_X86_64
+ 	for (i = 0; i < sgx_nr_epc_banks; i++)
 -- 
 2.25.1
 VERSION_PATCH_EOF
 )
 
 oot_dkms_patch_content=$(cat << 'DKMS_PATCH_EOF'
-From 790ece1bb65375806fb6b66ac61fd911cc0ab011 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio.fernando.osilva@gmail.com>
-Date: Mon, 8 Jun 2020 10:28:27 -0300
-Subject: [PATCH 1/1] Add DKMS configuration file
+From 9d6c26e65a428dfc1d1c5723e37ab29658623f3e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
+Date: Wed, 2 Sep 2020 14:27:49 -0300
+Subject: [PATCH] Add DKMS support
 
 ---
  dkms.conf | 6 ++++++
@@ -704,7 +744,7 @@ VERSION_PATCH_EOF
 )
 
 # OOT & DCAP Commits
-oot_driver_commit="602374c738ca58f83a1c17574d08e5d5e6341953"
+oot_driver_commit="b0a445ba09e96e1d0507487e5c496485a9cf3742"
 dcap_driver_commit="c9b707408d14fc1f1dcc519950bafb8bc58f0f42"
 
 # print the right color for each level

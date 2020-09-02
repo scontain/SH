@@ -1,7 +1,7 @@
-From 4edf6bc51ff79a251de62adbd69ac6062c6f71e4 Mon Sep 17 00:00:00 2001
-From: Chia-Che Tsai <chiache@tamu.edu>
-Date: Fri, 17 May 2019 15:08:49 -0500
-Subject: [PATCH 1/1] Enabling mmap for address unaligned to the enclave range
+From b68890eb2d44b1abc66dfb43edfd501e114558f1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
+Date: Wed, 2 Sep 2020 14:23:33 -0300
+Subject: [PATCH] Add page0 extension
 
 ---
  sgx.h      | 2 ++
@@ -10,7 +10,7 @@ Subject: [PATCH 1/1] Enabling mmap for address unaligned to the enclave range
  3 files changed, 9 insertions(+), 5 deletions(-)
 
 diff --git a/sgx.h b/sgx.h
-index 46dfc0f..47758b5 100644
+index 590464d..3b81645 100644
 --- a/sgx.h
 +++ b/sgx.h
 @@ -80,6 +80,8 @@
@@ -23,10 +23,10 @@ index 46dfc0f..47758b5 100644
  	resource_size_t	pa;
  	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
-index a03c30a..24c0fc4 100644
+index 44439c8..60709d7 100644
 --- a/sgx_encl.c
 +++ b/sgx_encl.c
-@@ -645,7 +645,7 @@ int sgx_encl_create(struct sgx_secs *secs)
+@@ -640,7 +640,7 @@ int sgx_encl_create(struct sgx_secs *secs)
  	}
  
  	down_read(&current->mm->mmap_sem);
@@ -35,7 +35,7 @@ index a03c30a..24c0fc4 100644
  	if (ret != -ENOENT) {
  		if (!ret)
  			ret = -EINVAL;
-@@ -653,8 +653,9 @@ int sgx_encl_create(struct sgx_secs *secs)
+@@ -648,8 +648,9 @@ int sgx_encl_create(struct sgx_secs *secs)
  		goto out;
  	}
  
@@ -48,10 +48,10 @@ index a03c30a..24c0fc4 100644
  		ret = -EINVAL;
  		up_read(&current->mm->mmap_sem);
 diff --git a/sgx_main.c b/sgx_main.c
-index 170dc8a..69a6f53 100644
+index 0c93635..8f982b3 100644
 --- a/sgx_main.c
 +++ b/sgx_main.c
-@@ -128,7 +128,7 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
+@@ -121,7 +121,7 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
  					   unsigned long pgoff,
  					   unsigned long flags)
  {
@@ -60,7 +60,7 @@ index 170dc8a..69a6f53 100644
  		return -EINVAL;
  
  	/* On 64-bit architecture, allow mmap() to exceed 32-bit encl
-@@ -153,7 +153,8 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
+@@ -146,7 +146,8 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
  	if (IS_ERR_VALUE(addr))
  		return addr;
  
