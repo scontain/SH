@@ -20,7 +20,7 @@ export DCAP_METRICS_PATCH_CONTENT=$(cat patches/dcap-metrics.patch | sed 's/\\$/
 export DCAP_METRICS_PATCH_VERSION=1
 
 export DCAP_VERSION_PATCH_CONTENT=$(cat patches/dcap-version.patch | sed 's/\\$/\\@!-tbs-!@/g')
-export DCAP_COMMIT_SHA="a693665833427653a5382d802d54918e9d0150cf"
+export DCAP_COMMIT_SHA="c9b707408d14fc1f1dcc519950bafb8bc58f0f42"
 
 echo -n "INFO: Creating install_sgx_driver.sh... "
 envsubst < install_sgx_driver.tmpl '\
