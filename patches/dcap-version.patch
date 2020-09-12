@@ -1,19 +1,19 @@
-From 8188ffd534b7d32755a8d6b088a5e63b0bfb593f Mon Sep 17 00:00:00 2001
+From 3f0cded6c144236c784ce0f75c75b5dce803bbd6 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
-Date: Wed, 15 Jul 2020 17:46:54 -0300
-Subject: [PATCH 1/1] Export patch information
+Date: Wed, 2 Sep 2020 01:21:47 -0300
+Subject: [PATCH] Add version extension
 
 ---
- driver/linux/sgx_main.c | 27 +++++++++++++++++++++++++++
- 1 file changed, 27 insertions(+)
+ driver/linux/main.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
 
-diff --git a/driver/linux/sgx_main.c b/driver/linux/sgx_main.c
-index 9f3a1ea..d29e352 100644
---- a/driver/linux/sgx_main.c
-+++ b/driver/linux/sgx_main.c
-@@ -85,6 +85,33 @@ u64 sgx_xfrm_mask = 0x3;
- u32 sgx_misc_reserved;
- u32 sgx_xsave_size_tbl[64];
+diff --git a/driver/linux/main.c b/driver/linux/main.c
+index bd0c821..0748255 100644
+--- a/driver/linux/main.c
++++ b/driver/linux/main.c
+@@ -523,6 +523,34 @@ static bool __init sgx_page_reclaimer_init(void)
+ 	return true;
+ }
  
 +/*
 + * Patch versions
@@ -42,9 +42,10 @@ index 9f3a1ea..d29e352 100644
 +module_param(patch_metrics, uint, 0444);
 +module_param(dcap, uint, 0444);
 +module_param_string(commit, commit, COMMIT_SHA_LEN, 0444);
- 
- // From intel_sgx.c
- bool sgx_enabled = false;
++
+ // Based on arch/x86/kernel/cpu/intel.c
+ static bool detect_sgx(struct cpuinfo_x86 *c)
+ {
 -- 
 2.25.1
 
