@@ -1,4 +1,4 @@
-From b68890eb2d44b1abc66dfb43edfd501e114558f1 Mon Sep 17 00:00:00 2001
+From f3848b151d90140d79738e7ca60613640925fe16 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
 Date: Wed, 2 Sep 2020 14:23:33 -0300
 Subject: [PATCH] Add page0 extension
@@ -10,12 +10,12 @@ Subject: [PATCH] Add page0 extension
  3 files changed, 9 insertions(+), 5 deletions(-)
 
 diff --git a/sgx.h b/sgx.h
-index 590464d..3b81645 100644
+index 62c19da..14d7b1b 100644
 --- a/sgx.h
 +++ b/sgx.h
-@@ -80,6 +80,8 @@
- 
- #define SGX_VA_SLOT_COUNT 512
+@@ -86,6 +86,8 @@
+     #define MSR_IA32_SGXLEPUBKEYHASH3	0x0000008F
+ #endif
  
 +#define PATCH_PAGE0 1
 +
@@ -23,20 +23,19 @@ index 590464d..3b81645 100644
  	resource_size_t	pa;
  	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
-index 44439c8..60709d7 100644
+index 04a1b9c..d53d171 100644
 --- a/sgx_encl.c
 +++ b/sgx_encl.c
-@@ -640,7 +640,7 @@ int sgx_encl_create(struct sgx_secs *secs)
- 	}
- 
+@@ -652,15 +652,16 @@ int sgx_encl_create(struct sgx_secs *secs)
+ #else
  	down_read(&current->mm->mmap_sem);
+ #endif
 -	ret = sgx_encl_find(current->mm, secs->base, &vma);
 +	ret = sgx_encl_find(current->mm, secs->base + secs->size - PAGE_SIZE, &vma);
  	if (ret != -ENOENT) {
  		if (!ret)
  			ret = -EINVAL;
-@@ -648,8 +648,9 @@ int sgx_encl_create(struct sgx_secs *secs)
- 		goto out;
+ 		goto out_locked;
  	}
  
 -	if (vma->vm_start != secs->base ||
@@ -46,9 +45,9 @@ index 44439c8..60709d7 100644
 +	    vma->vm_end < (secs->base + secs->size)
  	    /* vma->vm_pgoff != 0 */) {
  		ret = -EINVAL;
- 		up_read(&current->mm->mmap_sem);
+ 		goto out_locked;
 diff --git a/sgx_main.c b/sgx_main.c
-index 0c93635..8f982b3 100644
+index 4ff4e2b..f9488b2 100644
 --- a/sgx_main.c
 +++ b/sgx_main.c
 @@ -121,7 +121,7 @@ static unsigned long sgx_get_unmapped_area(struct file *file,

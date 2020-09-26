@@ -1,4 +1,4 @@
-From 9d6c26e65a428dfc1d1c5723e37ab29658623f3e Mon Sep 17 00:00:00 2001
+From 79b42a5974f371b34625023e644b36d4fa4f5871 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
 Date: Wed, 2 Sep 2020 14:27:49 -0300
 Subject: [PATCH] Add DKMS support
@@ -15,7 +15,7 @@ index 0000000..9c03f4a
 +++ b/dkms.conf
 @@ -0,0 +1,6 @@
 +PACKAGE_NAME="isgx"
-+PACKAGE_VERSION="2.6.0"
++PACKAGE_VERSION="2.11.0"
 +BUILT_MODULE_NAME[0]="isgx"
 +DEST_MODULE_LOCATION[0]="/kernel/drivers/intel/sgx"
 +AUTOINSTALL="yes"
