@@ -31,7 +31,7 @@ set -e
 
 # OOT Patches
 oot_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
-From c2bfeee6b7462f2ece98090c2487cb5f3a566f5a Mon Sep 17 00:00:00 2001
+From 3b47ff9dde963f0a45d577b1905f9569f686f0e7 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
 Date: Wed, 2 Sep 2020 14:28:23 -0300
 Subject: [PATCH] Add metrics extension
@@ -46,12 +46,12 @@ Subject: [PATCH] Add metrics extension
  create mode 100755 show_values.sh
 
 diff --git a/sgx.h b/sgx.h
-index 590464d..37295bf 100644
+index 62c19da..6a4a434 100644
 --- a/sgx.h
 +++ b/sgx.h
-@@ -80,6 +80,8 @@
- 
- #define SGX_VA_SLOT_COUNT 512
+@@ -86,6 +86,8 @@
+     #define MSR_IA32_SGXLEPUBKEYHASH3	0x0000008F
+ #endif
  
 +#define PATCH_METRICS 2
 +
@@ -59,7 +59,7 @@ index 590464d..37295bf 100644
  	resource_size_t	pa;
  	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
-index 44439c8..7dc89b6 100644
+index 04a1b9c..16fb79e 100644
 --- a/sgx_encl.c
 +++ b/sgx_encl.c
 @@ -73,6 +73,14 @@
@@ -86,16 +86,16 @@ index 44439c8..7dc89b6 100644
  	return ret;
  }
  
-@@ -663,6 +673,8 @@ int sgx_encl_create(struct sgx_secs *secs)
+@@ -678,6 +688,8 @@ int sgx_encl_create(struct sgx_secs *secs)
  	list_add_tail(&encl->encl_list, &encl->tgid_ctx->encl_list);
  	mutex_unlock(&sgx_tgid_ctx_mutex);
  
 +	sgx_nr_enclaves++;
 +
  	return 0;
- out:
- 	if (encl)
-@@ -948,6 +960,8 @@ int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
+ out_locked:
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0))
+@@ -970,6 +982,8 @@ int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
  	}
  
  	encl->flags |= SGX_ENCL_INITIALIZED;
@@ -104,14 +104,14 @@ index 44439c8..7dc89b6 100644
  	return 0;
  }
  
-@@ -999,4 +1013,5 @@ void sgx_encl_release(struct kref *ref)
+@@ -1021,4 +1035,5 @@ void sgx_encl_release(struct kref *ref)
  		fput(encl->pcmd);
  
  	kfree(encl);
 +	sgx_nr_enclaves--;
  }
 diff --git a/sgx_page_cache.c b/sgx_page_cache.c
-index 3770ad4..d1aebf9 100644
+index 77bea6e..ab79f19 100644
 --- a/sgx_page_cache.c
 +++ b/sgx_page_cache.c
 @@ -69,6 +69,7 @@
@@ -177,7 +177,7 @@ index 3770ad4..d1aebf9 100644
  	}
  
  	mutex_unlock(&encl->lock);
-@@ -526,6 +544,7 @@ struct sgx_epc_page *sgx_alloc_page(unsigned int flags)
+@@ -535,6 +553,7 @@ struct sgx_epc_page *sgx_alloc_page(unsigned int flags)
  		schedule();
  	}
  
@@ -245,7 +245,7 @@ METRICS_PATCH_EOF
 oot_metrics_patch_version=2
 
 oot_page0_patch_content=$(cat << 'PAGE0_PATCH_EOF'
-From b68890eb2d44b1abc66dfb43edfd501e114558f1 Mon Sep 17 00:00:00 2001
+From f3848b151d90140d79738e7ca60613640925fe16 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
 Date: Wed, 2 Sep 2020 14:23:33 -0300
 Subject: [PATCH] Add page0 extension
@@ -257,12 +257,12 @@ Subject: [PATCH] Add page0 extension
  3 files changed, 9 insertions(+), 5 deletions(-)
 
 diff --git a/sgx.h b/sgx.h
-index 590464d..3b81645 100644
+index 62c19da..14d7b1b 100644
 --- a/sgx.h
 +++ b/sgx.h
-@@ -80,6 +80,8 @@
- 
- #define SGX_VA_SLOT_COUNT 512
+@@ -86,6 +86,8 @@
+     #define MSR_IA32_SGXLEPUBKEYHASH3	0x0000008F
+ #endif
  
 +#define PATCH_PAGE0 1
 +
@@ -270,20 +270,19 @@ index 590464d..3b81645 100644
  	resource_size_t	pa;
  	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
-index 44439c8..60709d7 100644
+index 04a1b9c..d53d171 100644
 --- a/sgx_encl.c
 +++ b/sgx_encl.c
-@@ -640,7 +640,7 @@ int sgx_encl_create(struct sgx_secs *secs)
- 	}
- 
+@@ -652,15 +652,16 @@ int sgx_encl_create(struct sgx_secs *secs)
+ #else
  	down_read(&current->mm->mmap_sem);
+ #endif
 -	ret = sgx_encl_find(current->mm, secs->base, &vma);
 +	ret = sgx_encl_find(current->mm, secs->base + secs->size - PAGE_SIZE, &vma);
  	if (ret != -ENOENT) {
  		if (!ret)
  			ret = -EINVAL;
-@@ -648,8 +648,9 @@ int sgx_encl_create(struct sgx_secs *secs)
- 		goto out;
+ 		goto out_locked;
  	}
  
 -	if (vma->vm_start != secs->base ||
@@ -293,9 +292,9 @@ index 44439c8..60709d7 100644
 +	    vma->vm_end < (secs->base + secs->size)
  	    /* vma->vm_pgoff != 0 */) {
  		ret = -EINVAL;
- 		up_read(&current->mm->mmap_sem);
+ 		goto out_locked;
 diff --git a/sgx_main.c b/sgx_main.c
-index 0c93635..8f982b3 100644
+index 4ff4e2b..f9488b2 100644
 --- a/sgx_main.c
 +++ b/sgx_main.c
 @@ -121,7 +121,7 @@ static unsigned long sgx_get_unmapped_area(struct file *file,
@@ -324,17 +323,17 @@ PAGE0_PATCH_EOF
 oot_page0_patch_version=1
 
 oot_version_patch_content=$(cat << 'VERSION_PATCH_EOF'
-From 1038144bfea3b3535346e9953801e7226719c8e4 Mon Sep 17 00:00:00 2001
+From 8fff875dd7aef0b484a4fd0e8f4b526bf691c736 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
 Date: Wed, 2 Sep 2020 14:19:08 -0300
 Subject: [PATCH] Add version extension
 
 ---
- sgx_main.c | 44 ++++++++++++++++++++++++++++++++++++++++----
- 1 file changed, 40 insertions(+), 4 deletions(-)
+ sgx_main.c | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
 
 diff --git a/sgx_main.c b/sgx_main.c
-index 0c93635..ffd3a39 100644
+index 4ff4e2b..3a58f6c 100644
 --- a/sgx_main.c
 +++ b/sgx_main.c
 @@ -70,6 +70,7 @@
@@ -344,8 +343,8 @@ index 0c93635..ffd3a39 100644
 +#include <linux/moduleparam.h>
  
  #define DRV_DESCRIPTION "Intel SGX Driver"
- #define DRV_VERSION "2.6.0"
-@@ -106,6 +107,40 @@ u32 sgx_misc_reserved;
+ #define DRV_VERSION "2.11.0"
+@@ -106,6 +107,32 @@ u32 sgx_misc_reserved;
  u32 sgx_xsave_size_tbl[64];
  bool sgx_has_sgx2;
  
@@ -375,57 +374,16 @@ index 0c93635..ffd3a39 100644
 +module_param(dcap, uint, 0444);
 +module_param_string(commit, commit, COMMIT_SHA_LEN, 0444);
 +
-+
-+#ifdef CONFIG_COMPAT
-+long sgx_compat_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
-+{
-+	return sgx_ioctl(filep, cmd, arg);
-+}
-+#endif
-+
  static int sgx_mmap(struct file *file, struct vm_area_struct *vma)
  {
  	vma->vm_ops = &sgx_vm_ops;
-@@ -155,7 +190,7 @@ static const struct file_operations sgx_fops = {
- 	.owner			= THIS_MODULE,
- 	.unlocked_ioctl		= sgx_ioctl,
- #ifdef CONFIG_COMPAT
--	.compat_ioctl		= sgx_ioctl,
-+	.compat_ioctl		= sgx_compat_ioctl,
- #endif
- 	.mmap			= sgx_mmap,
- 	.get_unmapped_area	= sgx_get_unmapped_area,
-@@ -261,7 +296,7 @@ static int sgx_dev_init(struct device *parent)
- 	if (!sgx_add_page_wq) {
- 		pr_err("intel_sgx: alloc_workqueue() failed\n");
- 		ret = -ENOMEM;
--		goto out_page_cache;
-+		goto out_iounmap;
- 	}
- 
- 	sgx_dev.parent = parent;
-@@ -271,11 +306,12 @@ static int sgx_dev_init(struct device *parent)
- 		goto out_workqueue;
- 	}
- 
-+	if (ret)
-+		goto out_workqueue;
-+
- 	return 0;
- out_workqueue:
- 	destroy_workqueue(sgx_add_page_wq);
--out_page_cache:
--	sgx_page_cache_teardown();
- out_iounmap:
- #ifdef CONFIG_X86_64
- 	for (i = 0; i < sgx_nr_epc_banks; i++)
 -- 
 2.25.1
 VERSION_PATCH_EOF
 )
 
 oot_dkms_patch_content=$(cat << 'DKMS_PATCH_EOF'
-From 9d6c26e65a428dfc1d1c5723e37ab29658623f3e Mon Sep 17 00:00:00 2001
+From 79b42a5974f371b34625023e644b36d4fa4f5871 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
 Date: Wed, 2 Sep 2020 14:27:49 -0300
 Subject: [PATCH] Add DKMS support
@@ -442,7 +400,7 @@ index 0000000..9c03f4a
 +++ b/dkms.conf
 @@ -0,0 +1,6 @@
 +PACKAGE_NAME="isgx"
-+PACKAGE_VERSION="2.6.0"
++PACKAGE_VERSION="2.11.0"
 +BUILT_MODULE_NAME[0]="isgx"
 +DEST_MODULE_LOCATION[0]="/kernel/drivers/intel/sgx"
 +AUTOINSTALL="yes"
@@ -744,7 +702,7 @@ VERSION_PATCH_EOF
 )
 
 # OOT & DCAP Commits
-oot_driver_commit="b0a445ba09e96e1d0507487e5c496485a9cf3742"
+oot_driver_commit="4505f07271ed82230fce55b8d0d820dbc7a27c5a"
 dcap_driver_commit="c9b707408d14fc1f1dcc519950bafb8bc58f0f42"
 
 # print the right color for each level

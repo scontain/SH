@@ -1,6 +1,4 @@
-# SH
-
-Helper script to install Intel SGX driver.
+# Helper script to install Intel SGX driver
 
 ## Usage
 

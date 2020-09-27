@@ -1,4 +1,4 @@
-From c2bfeee6b7462f2ece98090c2487cb5f3a566f5a Mon Sep 17 00:00:00 2001
+From 3b47ff9dde963f0a45d577b1905f9569f686f0e7 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
 Date: Wed, 2 Sep 2020 14:28:23 -0300
 Subject: [PATCH] Add metrics extension
@@ -13,12 +13,12 @@ Subject: [PATCH] Add metrics extension
  create mode 100755 show_values.sh
 
 diff --git a/sgx.h b/sgx.h
-index 590464d..37295bf 100644
+index 62c19da..6a4a434 100644
 --- a/sgx.h
 +++ b/sgx.h
-@@ -80,6 +80,8 @@
- 
- #define SGX_VA_SLOT_COUNT 512
+@@ -86,6 +86,8 @@
+     #define MSR_IA32_SGXLEPUBKEYHASH3	0x0000008F
+ #endif
  
 +#define PATCH_METRICS 2
 +
@@ -26,7 +26,7 @@ index 590464d..37295bf 100644
  	resource_size_t	pa;
  	struct list_head list;
 diff --git a/sgx_encl.c b/sgx_encl.c
-index 44439c8..7dc89b6 100644
+index 04a1b9c..16fb79e 100644
 --- a/sgx_encl.c
 +++ b/sgx_encl.c
 @@ -73,6 +73,14 @@
@@ -53,16 +53,16 @@ index 44439c8..7dc89b6 100644
  	return ret;
  }
  
-@@ -663,6 +673,8 @@ int sgx_encl_create(struct sgx_secs *secs)
+@@ -678,6 +688,8 @@ int sgx_encl_create(struct sgx_secs *secs)
  	list_add_tail(&encl->encl_list, &encl->tgid_ctx->encl_list);
  	mutex_unlock(&sgx_tgid_ctx_mutex);
  
 +	sgx_nr_enclaves++;
 +
  	return 0;
- out:
- 	if (encl)
-@@ -948,6 +960,8 @@ int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
+ out_locked:
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0))
+@@ -970,6 +982,8 @@ int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
  	}
  
  	encl->flags |= SGX_ENCL_INITIALIZED;
@@ -71,14 +71,14 @@ index 44439c8..7dc89b6 100644
  	return 0;
  }
  
-@@ -999,4 +1013,5 @@ void sgx_encl_release(struct kref *ref)
+@@ -1021,4 +1035,5 @@ void sgx_encl_release(struct kref *ref)
  		fput(encl->pcmd);
  
  	kfree(encl);
 +	sgx_nr_enclaves--;
  }
 diff --git a/sgx_page_cache.c b/sgx_page_cache.c
-index 3770ad4..d1aebf9 100644
+index 77bea6e..ab79f19 100644
 --- a/sgx_page_cache.c
 +++ b/sgx_page_cache.c
 @@ -69,6 +69,7 @@
@@ -144,7 +144,7 @@ index 3770ad4..d1aebf9 100644
  	}
  
  	mutex_unlock(&encl->lock);
-@@ -526,6 +544,7 @@ struct sgx_epc_page *sgx_alloc_page(unsigned int flags)
+@@ -535,6 +553,7 @@ struct sgx_epc_page *sgx_alloc_page(unsigned int flags)
  		schedule();
  	}
  
