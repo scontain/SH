@@ -11,7 +11,7 @@ export OOT_PAGE0_PATCH_VERSION=1
 
 export OOT_VERSION_PATCH_CONTENT=$(cat patches/oot-version.patch | sed 's/\\$/\\@!-tbs-!@/g')
 export OOT_DKMS_PATCH_CONTENT=$(cat patches/oot-dkms.patch | sed 's/\\$/\\@!-tbs-!@/g')
-export OOT_COMMIT_SHA="4505f07271ed82230fce55b8d0d820dbc7a27c5a"
+export OOT_COMMIT_SHA="0373e2e8b96d9a261657b7657cb514f003f67094"
 
 # DCAP
 export DCAP_REPOSITORY="https://github.com/intel/SGXDataCenterAttestationPrimitives.git"
@@ -20,7 +20,7 @@ export DCAP_METRICS_PATCH_CONTENT=$(cat patches/dcap-metrics.patch | sed 's/\\$/
 export DCAP_METRICS_PATCH_VERSION=1
 
 export DCAP_VERSION_PATCH_CONTENT=$(cat patches/dcap-version.patch | sed 's/\\$/\\@!-tbs-!@/g')
-export DCAP_COMMIT_SHA="c9b707408d14fc1f1dcc519950bafb8bc58f0f42"
+export DCAP_COMMIT_SHA="30fac05232e13eab72c425a7788fafa5a46b3247"
 
 echo -n "INFO: Creating install_sgx_driver.sh... "
 envsubst < install_sgx_driver.tmpl '\

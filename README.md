@@ -54,3 +54,8 @@ $ curl -fsSL https://raw.githubusercontent.com/scontain/SH/master/install_sgx_dr
 ```bash
 $ curl -fsSL https://raw.githubusercontent.com/scontain/SH/master/install_sgx_driver.sh | bash -s - check -p metrics
 ```
+
+### To check whether it is necessary to create and update the patches, run:
+```bash
+$ ./run_ci.sh
+```
