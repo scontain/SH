@@ -1,17 +1,17 @@
-From 3f0cded6c144236c784ce0f75c75b5dce803bbd6 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
-Date: Wed, 2 Sep 2020 01:21:47 -0300
-Subject: [PATCH] Add version extension
+From 98165f4fb6ad99c64e368891198ce1384ec96f8e Mon Sep 17 00:00:00 2001
+From: "pamenas" <mpamenas@gmail.com>
+Date: Mon, 15 Feb 2021 12:55:59 +0100
+Subject: [PATCH] applied scone dcap version patch
 
 ---
  driver/linux/main.c | 28 ++++++++++++++++++++++++++++
  1 file changed, 28 insertions(+)
 
 diff --git a/driver/linux/main.c b/driver/linux/main.c
-index bd0c821..0748255 100644
+index a75969b..0cb41bb 100644
 --- a/driver/linux/main.c
 +++ b/driver/linux/main.c
-@@ -523,6 +523,34 @@ static bool __init sgx_page_reclaimer_init(void)
+@@ -480,6 +480,34 @@ static bool __init sgx_page_reclaimer_init(void)
  	return true;
  }
  
@@ -47,5 +47,5 @@ index bd0c821..0748255 100644
  static bool detect_sgx(struct cpuinfo_x86 *c)
  {
 -- 
-2.25.1
+2.17.1
 

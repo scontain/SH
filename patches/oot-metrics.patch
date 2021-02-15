@@ -1,7 +1,7 @@
-From 3b47ff9dde963f0a45d577b1905f9569f686f0e7 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
-Date: Wed, 2 Sep 2020 14:28:23 -0300
-Subject: [PATCH] Add metrics extension
+From 1c6b7b56b09e65d0242a11ff8ddc1cda652ee7a5 Mon Sep 17 00:00:00 2001
+From: "pamenas" <mpamenas@gmail.com>
+Date: Mon, 15 Feb 2021 18:56:21 +0100
+Subject: [PATCH] applied scone oot metrics patch
 
 ---
  sgx.h            |  2 ++
@@ -206,5 +206,5 @@ index 0000000..643f7ab
 +    echo "$metric= `cat $MODPATH/$metric`"
 +done
 -- 
-2.25.1
+2.17.1
 
