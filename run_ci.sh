@@ -1,6 +1,6 @@
 #!/bin/bash
 
-patches="version metrics page0 dcap"
+patches="version metrics page0 dcap fsgsbase"
 
 installer_url="https://raw.githubusercontent.com/scontain/SH/master/install_sgx_driver.sh"
 
@@ -15,7 +15,8 @@ function prepare_args {
     sed 's/dcap/--dcap/g' |\
     sed 's/version/-p version/g' |\
     sed 's/metrics/-p metrics/g' |\
-    sed 's/page0/-p page0/g'
+    sed 's/page0/-p page0/g' |\
+    sed 's/fsgsbase/-p fsgsbase/g'
 }
 
 function check_commit_sha {

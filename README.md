@@ -21,6 +21,7 @@ The following options are supported by 'install' command:
       -p version       installs the version patch (recommended)
       -p metrics       installs the metrics patch
       -p page0         installs the page0 patch (not available for DCAP)
+      -p fsgsbase      installs the fsgsbase patch
 
   -k, --dkms           installs the driver with DKMS (default for DCAP)
 
