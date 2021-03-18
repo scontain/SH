@@ -16,13 +16,13 @@ index 4ff4e2b..3a58f6c 100644
  #include <linux/kthread.h>
  #include <linux/platform_device.h>
 +#include <linux/moduleparam.h>
- 
+
  #define DRV_DESCRIPTION "Intel SGX Driver"
  #define DRV_VERSION "2.11.0"
-@@ -106,6 +107,32 @@ u32 sgx_misc_reserved;
+@@ -106,6 +107,38 @@ u32 sgx_misc_reserved;
  u32 sgx_xsave_size_tbl[64];
  bool sgx_has_sgx2;
- 
+
 +/*
 + * Patch versions
 + */
@@ -34,6 +34,10 @@ index 4ff4e2b..3a58f6c 100644
 +#define PATCH_METRICS 0
 +#endif
 +
++#ifndef PATCH_FSGSBASE
++#define PATCH_FSGSBASE 0
++#endif
++
 +#define IS_DCAP_DRIVER 0
 +
 +#define COMMIT_SHA "COMMIT_SHA1SUM"
@@ -42,16 +46,18 @@ index 4ff4e2b..3a58f6c 100644
 +static unsigned int patch_page0 = PATCH_PAGE0;
 +static unsigned int patch_metrics = PATCH_METRICS;
 +static unsigned int dcap = IS_DCAP_DRIVER;
++static unsigned int patch_fsgsbase = PATCH_FSGSBASE;
 +static char commit[COMMIT_SHA_LEN] = COMMIT_SHA;
 +
 +module_param(patch_page0, uint, 0444);
 +module_param(patch_metrics, uint, 0444);
 +module_param(dcap, uint, 0444);
++module_param(patch_fsgsbase, uint, 0444);
 +module_param_string(commit, commit, COMMIT_SHA_LEN, 0444);
 +
  static int sgx_mmap(struct file *file, struct vm_area_struct *vma)
  {
  	vma->vm_ops = &sgx_vm_ops;
--- 
+--
 2.25.1
 

@@ -1,30 +1,30 @@
 #!/bin/bash
 : '
-Access to this file is granted under the SCONE COMMERCIAL LICENSE V1.0 
+Access to this file is granted under the SCONE COMMERCIAL LICENSE V1.0
 
 Any use of this product using this file requires a commercial license from scontain UG, www.scontain.com.
 
-Permission is also granted  to use the Program for a reasonably limited period of time  (but no longer than 1 month) 
+Permission is also granted  to use the Program for a reasonably limited period of time  (but no longer than 1 month)
 for the purpose of evaluating its usefulness for a particular purpose.
 
-THERE IS NO WARRANTY FOR THIS PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN OTHERWISE STATED IN WRITING 
-THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, 
-INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. 
+THERE IS NO WARRANTY FOR THIS PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN OTHERWISE STATED IN WRITING
+THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
 
-THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM PROVE DEFECTIVE, 
+THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM PROVE DEFECTIVE,
 YOU ASSUME THE COST OF ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
 
 IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED ON IN WRITING WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MAY
-MODIFY AND/OR REDISTRIBUTE THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL, 
-INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM INCLUDING BUT NOT LIMITED TO LOSS 
-OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE 
+MODIFY AND/OR REDISTRIBUTE THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL,
+INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM INCLUDING BUT NOT LIMITED TO LOSS
+OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE
 WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
 
 Copyright (C) 2017-2018 scontain.com
 '
 
 #
-# - install patched sgx driver 
+# - install patched sgx driver
 
 
 set -e
@@ -341,13 +341,13 @@ index 4ff4e2b..3a58f6c 100644
  #include <linux/kthread.h>
  #include <linux/platform_device.h>
 +#include <linux/moduleparam.h>
- 
+
  #define DRV_DESCRIPTION "Intel SGX Driver"
  #define DRV_VERSION "2.11.0"
-@@ -106,6 +107,32 @@ u32 sgx_misc_reserved;
+@@ -106,6 +107,38 @@ u32 sgx_misc_reserved;
  u32 sgx_xsave_size_tbl[64];
  bool sgx_has_sgx2;
- 
+
 +/*
 + * Patch versions
 + */
@@ -359,6 +359,10 @@ index 4ff4e2b..3a58f6c 100644
 +#define PATCH_METRICS 0
 +#endif
 +
++#ifndef PATCH_FSGSBASE
++#define PATCH_FSGSBASE 0
++#endif
++
 +#define IS_DCAP_DRIVER 0
 +
 +#define COMMIT_SHA "COMMIT_SHA1SUM"
@@ -367,17 +371,19 @@ index 4ff4e2b..3a58f6c 100644
 +static unsigned int patch_page0 = PATCH_PAGE0;
 +static unsigned int patch_metrics = PATCH_METRICS;
 +static unsigned int dcap = IS_DCAP_DRIVER;
++static unsigned int patch_fsgsbase = PATCH_FSGSBASE;
 +static char commit[COMMIT_SHA_LEN] = COMMIT_SHA;
 +
 +module_param(patch_page0, uint, 0444);
 +module_param(patch_metrics, uint, 0444);
 +module_param(dcap, uint, 0444);
++module_param(patch_fsgsbase, uint, 0444);
 +module_param_string(commit, commit, COMMIT_SHA_LEN, 0444);
 +
  static int sgx_mmap(struct file *file, struct vm_area_struct *vma)
  {
  	vma->vm_ops = &sgx_vm_ops;
--- 
+--
 2.25.1
 VERSION_PATCH_EOF
 )
@@ -409,6 +415,90 @@ index 0000000..9c03f4a
 2.25.1
 DKMS_PATCH_EOF
 )
+
+oot_fsgsbase_patch_content=$(cat << 'FSGSBASE_PATCH_EOF'
+diff --git a/sgx.h b/sgx.h
+index 62c19da..88ff110 100644
+--- a/sgx.h
++++ b/sgx.h
+@@ -86,6 +86,8 @@
+     #define MSR_IA32_SGXLEPUBKEYHASH3	0x0000008F
+ #endif
+ 
++#define PATCH_FSGSBASE 1
++
+ struct sgx_epc_page {
+ 	resource_size_t	pa;
+ 	struct list_head list;
+diff --git a/sgx_main.c b/sgx_main.c
+index 4ff4e2b..6a6acb8 100644
+--- a/sgx_main.c
++++ b/sgx_main.c
+@@ -195,6 +195,26 @@ static void sgx_reset_pubkey_hash(void *failed)
+ 
+ static SIMPLE_DEV_PM_OPS(sgx_drv_pm, sgx_pm_suspend, NULL);
+ 
++static int enabled_fsgsbase = 0;
++
++static
++void fsgsbase_enable(void* unused) {
++    u64 cr4;
++
++    cr4 =  __read_cr4();
++    cr4 |= X86_CR4_FSGSBASE;
++    asm volatile("mov %0,%%cr4": "+r" (cr4));
++}
++
++static
++void fsgsbase_disable(void* unused) {
++    u64 cr4;
++
++    cr4 =  __read_cr4();
++    cr4 &= ~X86_CR4_FSGSBASE;
++    asm volatile("mov %0,%%cr4": "+r" (cr4));
++}
++
+ static int sgx_dev_init(struct device *parent)
+ {
+ 	unsigned int eax, ebx, ecx, edx;
+@@ -286,6 +306,14 @@ static int sgx_dev_init(struct device *parent)
+ 		pr_info("intel_sgx:  can not reset SGX LE public key hash MSRs\n");
+ 	}
+ 
++	if (boot_cpu_has(X86_FEATURE_FSGSBASE)) {
++		if (!(__read_cr4() & X86_CR4_FSGSBASE)) {
++			on_each_cpu(fsgsbase_enable, 0, 1);
++			enabled_fsgsbase = 1;
++			pr_emerg("intel_sgx: fsgsbase extension has been enabled.\nPlease be aware that this is known to introduce a local vulnerability\nand is meant to be used only in development environments.\nFor production systems, use a kernel version that supports this extension (mainline kernel >=5.9)");
++		}
++	}
++
+ 	return 0;
+ out_workqueue:
+ 	destroy_workqueue(sgx_add_page_wq);
+@@ -387,6 +415,8 @@ static struct platform_driver sgx_drv = {
+ };
+ 
+ static struct platform_device *pdev;
++void fsgsbase_enable(void*);
++void fsgsbase_disable(void*);
+ int init_sgx_module(void)
+ {
+ 	platform_driver_register(&sgx_drv);
+@@ -401,6 +431,10 @@ void cleanup_sgx_module(void)
+ 	dev_set_uevent_suppress(&pdev->dev, true);
+ 	platform_device_unregister(pdev);
+ 	platform_driver_unregister(&sgx_drv);
++	if (enabled_fsgsbase) {
++		on_each_cpu(fsgsbase_disable, 0, 1);
++		pr_info("intel_sgx: disabled fsgsbase extension");
++	}
+ }
+ 
+ module_init(init_sgx_module);
+FSGSBASE_PATCH_EOF
+)
+oot_fsgsbase_patch_version=1
 
 # DCAP Patches
 dcap_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
@@ -701,8 +791,82 @@ index bd0c821..0748255 100644
 VERSION_PATCH_EOF
 )
 
+dcap_fsgsbase_patch_content=$(cat << 'FSGSBASE_PATCH_EOF'
+diff --git a/driver/linux/main.c b/driver/linux/main.c
+index bd0c821..4c68c9a 100644
+--- a/driver/linux/main.c
++++ b/driver/linux/main.c
+@@ -790,6 +790,26 @@ static bool __init sgx_page_cache_init(void)
+ 	return true;
+ }
+ 
++static int enabled_fsgsbase = 0;
++
++static
++void fsgsbase_enable(void* unused) {
++    u64 cr4;
++
++    cr4 =  __read_cr4();
++    cr4 |= X86_CR4_FSGSBASE;
++    asm volatile("mov %0,%%cr4": "+r" (cr4));
++}
++
++static
++void fsgsbase_disable(void* unused) {
++    u64 cr4;
++
++    cr4 =  __read_cr4();
++    cr4 &= ~X86_CR4_FSGSBASE;
++    asm volatile("mov %0,%%cr4": "+r" (cr4));
++}
++
+ static int __init sgx_init(void)
+ {
+ 	int ret;
+@@ -809,6 +829,14 @@ static int __init sgx_init(void)
+ 
+ 	pr_info("intel_sgx: " DRV_DESCRIPTION " v" DRV_VERSION "\n");
+ 
++	if (boot_cpu_has(X86_FEATURE_FSGSBASE)) {
++		if (!(__read_cr4() & X86_CR4_FSGSBASE)) {
++			on_each_cpu(fsgsbase_enable, 0, 1);
++			enabled_fsgsbase = 1;
++			pr_emerg("intel_sgx: fsgsbase extension has been enabled.\nPlease be aware that this is known to introduce a local vulnerability\nand is meant to be used only in development environments.\nFor production systems, use a kernel version that supports this extension (mainline kernel >=5.9)\n");
++		}
++	}
++
+ 	return 0;
+ 
+ err_kthread:
+@@ -825,5 +853,9 @@ static void __exit sgx_exit(void)
+ 	sgx_drv_exit();
+ 	kthread_stop(ksgxswapd_tsk);
+ 	sgx_page_cache_teardown();
++	if (enabled_fsgsbase) {
++		on_each_cpu(fsgsbase_disable, 0, 1);
++		pr_info("intel_sgx: disabled fsgsbase extension\n");
++	}
+ }
+ module_exit(sgx_exit);
+diff --git a/driver/linux/sgx.h b/driver/linux/sgx.h
+index 1a6ca5f..ede8b93 100644
+--- a/driver/linux/sgx.h
++++ b/driver/linux/sgx.h
+@@ -41,6 +41,8 @@ struct sgx_epc_section {
+ #define SGX_NR_LOW_PAGES		32
+ #define SGX_NR_HIGH_PAGES		64
+ 
++#define PATCH_FSGSBASE 1
++
+ extern struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
+ 
+ static inline struct sgx_epc_section *sgx_get_epc_section(struct sgx_epc_page *page)
+FSGSBASE_PATCH_EOF
+)
+dcap_fsgsbase_patch_version=1
+
 # OOT & DCAP Commits
-oot_driver_commit="4505f07271ed82230fce55b8d0d820dbc7a27c5a"
+oot_driver_commit="0373e2e8b96d9a261657b7657cb514f003f67094"
 dcap_driver_commit="c9b707408d14fc1f1dcc519950bafb8bc58f0f42"
 
 # print the right color for each level
@@ -730,7 +894,7 @@ function msg_color {
 }
 
 function no_error_message {
-    exit $? 
+    exit $?
 }
 
 function issue_error_exit_message {
@@ -777,7 +941,7 @@ function load_module {
 function check_oot_driver {
     if [[ ! -e /sys/module/isgx/version ]] ; then
         oot_driver_found=false
-    else 
+    else
         oot_driver_found=true
         verbose "SGX-driver already installed."
         if [[ ! -e /dev/isgx ]] ; then
@@ -789,7 +953,7 @@ function check_oot_driver {
 function check_dcap_driver {
     if [[ ! -e /sys/module/intel_sgx/version ]] ; then
         dcap_driver_found=false
-    else 
+    else
         dcap_driver_found=true
         verbose "DCAP SGX-driver already installed."
         if [[ ! -e /dev/sgx ]] ; then
@@ -813,7 +977,7 @@ function install_common_dependencies {
     msg_color "info"
     echo "INFO: Installing dependencies... "
     msg_color "default"
-    
+
     sudo apt-get update > /dev/null && \
     sudo apt-get install -y build-essential git patch linux-headers-$(uname -r) > /dev/null
 
@@ -854,11 +1018,15 @@ function apply_oot_patches {
     fi
     if [[ $patch_metrics == "1" ]]; then
         echo "Applying metrics patch..."
-	echo "$oot_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+        echo "$oot_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
     fi
     if [[ $patch_page0 == "1" ]]; then
         echo "Applying page0 patch..."
-	echo "$oot_page0_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+        echo "$oot_page0_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+    fi
+    if [[ $patch_fsgsbase == "1" ]]; then
+        echo "Applying fsgsbase patch..."
+        echo "$oot_fsgsbase_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
     fi
 #    if [[ $patch_performance == "1" ]]; then
 #        echo "Applying performance patch..."
@@ -931,10 +1099,14 @@ function apply_dcap_patches {
     if [[ $patch_version == "1" ]]; then
         echo "Applying version patch..."
         echo "$dcap_version_patch_content" | sed "s/COMMIT_SHA1SUM/$dcap_commit_sha/g" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
-    fi    
+    fi
     if [[ $patch_metrics == "1" ]]; then
         echo "Applying metrics patch..."
-	echo "$dcap_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
+        echo "$dcap_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
+    fi
+    if [[ $patch_fsgsbase == "1" ]]; then
+        echo "Applying fsgsbase patch..."
+        echo "$dcap_fsgsbase_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
     fi
     if [[ $patch_page0 == "1" ]]; then
         msg_color "warning"
@@ -1041,7 +1213,7 @@ function check_commit {
 # first argument: driver_type [OOT or DCAP]
 function check_dkms {
     local driver_version=$1
-    
+
     echo -n "Use DKMS: "
 
     dkms_cmd="$(which dkms || true)"
@@ -1100,6 +1272,22 @@ function check_patches {
             update_needed=true
         fi
     fi
+
+    if [[ $fsgsbase_ver != "0" ]]; then
+        echo -n "Patch 'fsgsbase' version  : $fsgsbase_ver "
+
+        if [[ $fsgsbase_ver == $oot_fsgsbase_patch_version ]]; then
+            echo "(Up to date)"
+        else
+            echo "(Outdated - $(($oot_fsgsbase_patch_version - $fsgsbase_ver)) newer version(s) available)"
+            update_needed=true
+        fi
+    else
+        if [[ $patch_fsgsbase == "1" && $driver_version == "OOT" ]]; then
+            echo "Patch 'fsgsbase' not found!"
+            update_needed=true
+        fi
+    fi
 }
 
 function describe {
@@ -1124,7 +1312,7 @@ function describe {
         fi
 
         echo "--force"
-        
+
         exit 1
     else
         driver_commit=$(cat "$module_path/parameters/commit")
@@ -1132,6 +1320,7 @@ function describe {
 
     metrics_ver=$(cat $module_path/parameters/patch_metrics)
     page0_ver=$(cat $module_path/parameters/patch_page0)
+    fsgsbase_ver=$(cat $module_path/parameters/patch_fsgsbase)
 
     echo -n "Detected patches: version "
 
@@ -1145,17 +1334,22 @@ function describe {
         page0_ver=$(cat $module_path/parameters/patch_page0)
     fi
 
+    if [[ $fsgsbase_ver != "0" ]]; then # check if a metric is exposed
+        echo -n "fsgsbase "
+        fsgsbase_ver=$(cat $module_path/parameters/patch_fsgsbase)
+    fi
+
     echo -ne "\n\n"
 
     check_dkms $driver_type
 
     echo
- 
+
     check_commit $driver_type $driver_commit
 
     echo
 
-    check_patches $driver_type 
+    check_patches $driver_type
 
     if [[ $update_needed == true ]]; then
         msg_color "warning"
@@ -1231,6 +1425,7 @@ The following options are supported by 'install' command:
       -p version       installs the version patch (recommended)
       -p metrics       installs the metrics patch
       -p page0         installs the page0 patch (not available for DCAP)
+      -p fsgsbase      installs the fsgsbase patch
 
   -k, --dkms           installs the driver with DKMS (default for DCAP)
 
@@ -1278,6 +1473,10 @@ function enable_patch {
 
         page0)
         patch_page0=1
+        ;;
+
+        fsgsbase)
+        patch_fsgsbase=1
         ;;
 
         *)
@@ -1407,7 +1606,7 @@ if [[ $cmd_check == "1" ]]; then
     if [[ $dcap_driver_found == true ]]; then
         describe DCAP /sys/module/intel_sgx
     fi
-    
+
     if [[ $oot_driver_found == true ]]; then
         describe OOT /sys/module/isgx
     fi

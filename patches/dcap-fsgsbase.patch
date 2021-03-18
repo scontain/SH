@@ -1,0 +1,69 @@
+diff --git a/driver/linux/main.c b/driver/linux/main.c
+index bd0c821..4c68c9a 100644
+--- a/driver/linux/main.c
++++ b/driver/linux/main.c
+@@ -790,6 +790,26 @@ static bool __init sgx_page_cache_init(void)
+ 	return true;
+ }
+ 
++static int enabled_fsgsbase = 0;
++
++static
++void fsgsbase_enable(void* unused) {
++    u64 cr4;
++
++    cr4 =  __read_cr4();
++    cr4 |= X86_CR4_FSGSBASE;
++    asm volatile("mov %0,%%cr4": "+r" (cr4));
++}
++
++static
++void fsgsbase_disable(void* unused) {
++    u64 cr4;
++
++    cr4 =  __read_cr4();
++    cr4 &= ~X86_CR4_FSGSBASE;
++    asm volatile("mov %0,%%cr4": "+r" (cr4));
++}
++
+ static int __init sgx_init(void)
+ {
+ 	int ret;
+@@ -809,6 +829,14 @@ static int __init sgx_init(void)
+ 
+ 	pr_info("intel_sgx: " DRV_DESCRIPTION " v" DRV_VERSION "\n");
+ 
++	if (boot_cpu_has(X86_FEATURE_FSGSBASE)) {
++		if (!(__read_cr4() & X86_CR4_FSGSBASE)) {
++			on_each_cpu(fsgsbase_enable, 0, 1);
++			enabled_fsgsbase = 1;
++			pr_emerg("intel_sgx: fsgsbase extension has been enabled.\nPlease be aware that this is known to introduce a local vulnerability\nand is meant to be used only in development environments.\nFor production systems, use a kernel version that supports this extension (mainline kernel >=5.9)\n");
++		}
++	}
++
+ 	return 0;
+ 
+ err_kthread:
+@@ -825,5 +853,9 @@ static void __exit sgx_exit(void)
+ 	sgx_drv_exit();
+ 	kthread_stop(ksgxswapd_tsk);
+ 	sgx_page_cache_teardown();
++	if (enabled_fsgsbase) {
++		on_each_cpu(fsgsbase_disable, 0, 1);
++		pr_info("intel_sgx: disabled fsgsbase extension\n");
++	}
+ }
+ module_exit(sgx_exit);
+diff --git a/driver/linux/sgx.h b/driver/linux/sgx.h
+index 1a6ca5f..ede8b93 100644
+--- a/driver/linux/sgx.h
++++ b/driver/linux/sgx.h
+@@ -41,6 +41,8 @@ struct sgx_epc_section {
+ #define SGX_NR_LOW_PAGES		32
+ #define SGX_NR_HIGH_PAGES		64
+ 
++#define PATCH_FSGSBASE 1
++
+ extern struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
+ 
+ static inline struct sgx_epc_section *sgx_get_epc_section(struct sgx_epc_page *page)

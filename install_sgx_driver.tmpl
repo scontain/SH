@@ -1,30 +1,30 @@
 #!/bin/bash
 : '
-Access to this file is granted under the SCONE COMMERCIAL LICENSE V1.0 
+Access to this file is granted under the SCONE COMMERCIAL LICENSE V1.0
 
 Any use of this product using this file requires a commercial license from scontain UG, www.scontain.com.
 
-Permission is also granted  to use the Program for a reasonably limited period of time  (but no longer than 1 month) 
+Permission is also granted  to use the Program for a reasonably limited period of time  (but no longer than 1 month)
 for the purpose of evaluating its usefulness for a particular purpose.
 
-THERE IS NO WARRANTY FOR THIS PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN OTHERWISE STATED IN WRITING 
-THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, 
-INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. 
+THERE IS NO WARRANTY FOR THIS PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN OTHERWISE STATED IN WRITING
+THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
 
-THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM PROVE DEFECTIVE, 
+THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM PROVE DEFECTIVE,
 YOU ASSUME THE COST OF ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
 
 IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED ON IN WRITING WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MAY
-MODIFY AND/OR REDISTRIBUTE THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL, 
-INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM INCLUDING BUT NOT LIMITED TO LOSS 
-OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE 
+MODIFY AND/OR REDISTRIBUTE THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL,
+INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM INCLUDING BUT NOT LIMITED TO LOSS
+OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE
 WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
 
 Copyright (C) 2017-2018 scontain.com
 '
 
 #
-# - install patched sgx driver 
+# - install patched sgx driver
 
 
 set -e
@@ -52,6 +52,12 @@ ${OOT_DKMS_PATCH_CONTENT}
 DKMS_PATCH_EOF
 )
 
+oot_fsgsbase_patch_content=$(cat << 'FSGSBASE_PATCH_EOF'
+${OOT_FSGSBASE_PATCH_CONTENT}
+FSGSBASE_PATCH_EOF
+)
+oot_fsgsbase_patch_version=${OOT_FSGSBASE_PATCH_VERSION}
+
 # DCAP Patches
 dcap_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
 ${DCAP_METRICS_PATCH_CONTENT}
@@ -63,6 +69,12 @@ dcap_version_patch_content=$(cat << 'VERSION_PATCH_EOF'
 ${DCAP_VERSION_PATCH_CONTENT}
 VERSION_PATCH_EOF
 )
+
+dcap_fsgsbase_patch_content=$(cat << 'FSGSBASE_PATCH_EOF'
+${DCAP_FSGSBASE_PATCH_CONTENT}
+FSGSBASE_PATCH_EOF
+)
+dcap_fsgsbase_patch_version=${DCAP_FSGSBASE_PATCH_VERSION}
 
 # OOT & DCAP Commits
 oot_driver_commit="${OOT_COMMIT_SHA}"
@@ -93,7 +105,7 @@ function msg_color {
 }
 
 function no_error_message {
-    exit $? 
+    exit $?
 }
 
 function issue_error_exit_message {
@@ -140,7 +152,7 @@ function load_module {
 function check_oot_driver {
     if [[ ! -e /sys/module/isgx/version ]] ; then
         oot_driver_found=false
-    else 
+    else
         oot_driver_found=true
         verbose "SGX-driver already installed."
         if [[ ! -e /dev/isgx ]] ; then
@@ -152,7 +164,7 @@ function check_oot_driver {
 function check_dcap_driver {
     if [[ ! -e /sys/module/intel_sgx/version ]] ; then
         dcap_driver_found=false
-    else 
+    else
         dcap_driver_found=true
         verbose "DCAP SGX-driver already installed."
         if [[ ! -e /dev/sgx ]] ; then
@@ -176,7 +188,7 @@ function install_common_dependencies {
     msg_color "info"
     echo "INFO: Installing dependencies... "
     msg_color "default"
-    
+
     sudo apt-get update > /dev/null && \
     sudo apt-get install -y build-essential git patch linux-headers-$(uname -r) > /dev/null
 
@@ -217,11 +229,15 @@ function apply_oot_patches {
     fi
     if [[ $patch_metrics == "1" ]]; then
         echo "Applying metrics patch..."
-	echo "$oot_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+        echo "$oot_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
     fi
     if [[ $patch_page0 == "1" ]]; then
         echo "Applying page0 patch..."
-	echo "$oot_page0_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+        echo "$oot_page0_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
+    fi
+    if [[ $patch_fsgsbase == "1" ]]; then
+        echo "Applying fsgsbase patch..."
+        echo "$oot_fsgsbase_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p1
     fi
 #    if [[ $patch_performance == "1" ]]; then
 #        echo "Applying performance patch..."
@@ -294,10 +310,14 @@ function apply_dcap_patches {
     if [[ $patch_version == "1" ]]; then
         echo "Applying version patch..."
         echo "$dcap_version_patch_content" | sed "s/COMMIT_SHA1SUM/$dcap_commit_sha/g" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
-    fi    
+    fi
     if [[ $patch_metrics == "1" ]]; then
         echo "Applying metrics patch..."
-	echo "$dcap_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
+        echo "$dcap_metrics_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
+    fi
+    if [[ $patch_fsgsbase == "1" ]]; then
+        echo "Applying fsgsbase patch..."
+        echo "$dcap_fsgsbase_patch_content" | sed 's/\\@!-tbs-!@$/\\/g' | patch -p3
     fi
     if [[ $patch_page0 == "1" ]]; then
         msg_color "warning"
@@ -404,7 +424,7 @@ function check_commit {
 # first argument: driver_type [OOT or DCAP]
 function check_dkms {
     local driver_version=$1
-    
+
     echo -n "Use DKMS: "
 
     dkms_cmd="$(which dkms || true)"
@@ -463,6 +483,22 @@ function check_patches {
             update_needed=true
         fi
     fi
+
+    if [[ $fsgsbase_ver != "0" ]]; then
+        echo -n "Patch 'fsgsbase' version  : $fsgsbase_ver "
+
+        if [[ $fsgsbase_ver == $oot_fsgsbase_patch_version ]]; then
+            echo "(Up to date)"
+        else
+            echo "(Outdated - $(($oot_fsgsbase_patch_version - $fsgsbase_ver)) newer version(s) available)"
+            update_needed=true
+        fi
+    else
+        if [[ $patch_fsgsbase == "1" && $driver_version == "OOT" ]]; then
+            echo "Patch 'fsgsbase' not found!"
+            update_needed=true
+        fi
+    fi
 }
 
 function describe {
@@ -487,7 +523,7 @@ function describe {
         fi
 
         echo "--force"
-        
+
         exit 1
     else
         driver_commit=$(cat "$module_path/parameters/commit")
@@ -495,6 +531,7 @@ function describe {
 
     metrics_ver=$(cat $module_path/parameters/patch_metrics)
     page0_ver=$(cat $module_path/parameters/patch_page0)
+    fsgsbase_ver=$(cat $module_path/parameters/patch_fsgsbase)
 
     echo -n "Detected patches: version "
 
@@ -508,17 +545,22 @@ function describe {
         page0_ver=$(cat $module_path/parameters/patch_page0)
     fi
 
+    if [[ $fsgsbase_ver != "0" ]]; then # check if a metric is exposed
+        echo -n "fsgsbase "
+        fsgsbase_ver=$(cat $module_path/parameters/patch_fsgsbase)
+    fi
+
     echo -ne "\n\n"
 
     check_dkms $driver_type
 
     echo
- 
+
     check_commit $driver_type $driver_commit
 
     echo
 
-    check_patches $driver_type 
+    check_patches $driver_type
 
     if [[ $update_needed == true ]]; then
         msg_color "warning"
@@ -594,6 +636,7 @@ The following options are supported by 'install' command:
       -p version       installs the version patch (recommended)
       -p metrics       installs the metrics patch
       -p page0         installs the page0 patch (not available for DCAP)
+      -p fsgsbase      installs the fsgsbase patch
 
   -k, --dkms           installs the driver with DKMS (default for DCAP)
 
@@ -641,6 +684,10 @@ function enable_patch {
 
         page0)
         patch_page0=1
+        ;;
+
+        fsgsbase)
+        patch_fsgsbase=1
         ;;
 
         *)
@@ -770,7 +817,7 @@ if [[ $cmd_check == "1" ]]; then
     if [[ $dcap_driver_found == true ]]; then
         describe DCAP /sys/module/intel_sgx
     fi
-    
+
     if [[ $oot_driver_found == true ]]; then
         describe OOT /sys/module/isgx
     fi
