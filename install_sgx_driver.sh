@@ -20,7 +20,7 @@ INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE T
 OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE
 WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
 
-Copyright (C) 2017-2018 scontain.com
+Copyright (C) 2017-2021 scontain.com
 '
 
 #
@@ -502,41 +502,25 @@ oot_fsgsbase_patch_version=1
 
 # DCAP Patches
 dcap_metrics_patch_content=$(cat << 'METRICS_PATCH_EOF'
-From 911a08cd6e96eba66a629ba80871c6b0c5c830f0 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?F=C3=A1bio=20Silva?= <fabio@scontain.com>
-Date: Wed, 2 Sep 2020 00:45:58 -0300
-Subject: [PATCH] Add metrics extension
-
----
- driver/linux/driver.h       |  2 ++
- driver/linux/encl.c         | 18 ++++++++++++++++++
- driver/linux/ioctl.c        | 12 ++++++++++++
- driver/linux/main.c         | 26 ++++++++++++++++++++++++++
- driver/linux/show_values.sh | 23 +++++++++++++++++++++++
- 5 files changed, 81 insertions(+)
- create mode 100755 driver/linux/show_values.sh
-
 diff --git a/driver/linux/driver.h b/driver/linux/driver.h
-index c90e132..c47fd79 100644
+index 4024f48..7794508 100644
 --- a/driver/linux/driver.h
 +++ b/driver/linux/driver.h
-@@ -12,6 +12,8 @@
- #include "uapi/asm/sgx_oot.h"
- #include "sgx.h"
- 
+@@ -27,4 +27,6 @@ long sgx_ioctl(struct file *filep, unsigned int cmd, unsigned long arg);
+ int sgx_drv_init(void);
+ int sgx_drv_exit(void);
+
 +#define PATCH_METRICS 1
 +
- #define SGX_EINIT_SPIN_COUNT	20
- #define SGX_EINIT_SLEEP_COUNT	50
- #define SGX_EINIT_SLEEP_TIME	20
+ #endif /* __ARCH_X86_SGX_DRIVER_H__ */
 diff --git a/driver/linux/encl.c b/driver/linux/encl.c
-index ebac232..02c14b0 100644
+index b9746c5..ed572e1 100644
 --- a/driver/linux/encl.c
 +++ b/driver/linux/encl.c
 @@ -14,6 +14,18 @@
  #include "dcap.h"
- 
  #include <linux/version.h>
+
 +#include <linux/moduleparam.h>
 +
 +extern unsigned int sgx_nr_enclaves;
@@ -549,44 +533,45 @@ index ebac232..02c14b0 100644
 +module_param(sgx_nr_high_pages, uint, 0440);
 +module_param(sgx_loaded_back, uint, 0440);
 +module_param(sgx_nr_marked_old, uint, 0440);
- 
- static int __sgx_encl_eldu(struct sgx_encl_page *encl_page,
- 			   struct sgx_epc_page *epc_page,
-@@ -55,6 +67,8 @@ static int __sgx_encl_eldu(struct sgx_encl_page *encl_page,
+
+ /*
+  * ELDU: Load an EPC page as unblocked. For more info, see "OS Management of EPC
+@@ -58,6 +70,8 @@ static int __sgx_encl_eldu(struct sgx_encl_page *encl_page,
  		ret = -EFAULT;
  	}
- 
+
 +	sgx_loaded_back++;
 +
  	kunmap_atomic((void *)(unsigned long)(pginfo.metadata - b.pcmd_offset));
  	kunmap_atomic((void *)(unsigned long)pginfo.contents);
- 
-@@ -616,6 +630,9 @@ void sgx_encl_release(struct kref *ref)
- {
- 	struct sgx_encl *encl = container_of(ref, struct sgx_encl, refcount);
- 
-+	if (atomic_read(&encl->flags) & SGX_ENCL_CREATED)
+
+@@ -474,6 +488,10 @@ void sgx_encl_release(struct kref *ref)
+ 	unsigned long index;
+ #endif
+
++	if (encl->flags & SGX_ENCL_CREATED)
 +		sgx_nr_enclaves--;
 +
- 	sgx_encl_destroy(encl);
- 
- 	if (encl->backing)
-@@ -716,6 +733,7 @@ static int sgx_encl_test_and_clear_young_cb(pte_t *ptep,
++
+ #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0))
+ 	radix_tree_for_each_slot(slot, &encl->page_tree, &iter, 0) {
+ 		entry = *slot;
+@@ -748,6 +766,7 @@ static int sgx_encl_test_and_clear_young_cb(pte_t *ptep,
  	ret = pte_young(*ptep);
  	if (ret) {
  		pte = pte_mkold(*ptep);
 +		sgx_nr_marked_old++;
  		set_pte_at((struct mm_struct *)data, addr, ptep, pte);
  	}
- 
+
 diff --git a/driver/linux/ioctl.c b/driver/linux/ioctl.c
-index 1ca7612..ffaabb8 100644
+index e8aa47a..3d3db8b 100644
 --- a/driver/linux/ioctl.c
 +++ b/driver/linux/ioctl.c
-@@ -18,6 +18,14 @@
- 
+@@ -17,6 +17,14 @@
+ #include "encls.h"
+
  #include <linux/version.h>
- #include "sgx_wl.h"
 +#include <linux/moduleparam.h>
 +
 +unsigned int sgx_init_enclaves = 0;
@@ -595,50 +580,49 @@ index 1ca7612..ffaabb8 100644
 +module_param(sgx_init_enclaves, uint, 0440);
 +module_param(sgx_nr_enclaves, uint, 0440);
 +module_param(sgx_nr_added_pages, uint, 0440);
- 
- /* A per-cpu cache for the last known values of IA32_SGXLEPUBKEYHASHx MSRs. */
- static DEFINE_PER_CPU(u64 [4], sgx_lepubkeyhash_cache);
-@@ -190,6 +198,7 @@ static int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
- 	 */
- 	atomic_or(SGX_ENCL_CREATED, &encl->flags);
- 
+
+
+ static struct sgx_va_page *sgx_encl_grow(struct sgx_encl *encl)
+@@ -117,6 +125,7 @@ static int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
+
+ 	/* Set only after completion, as encl->lock has not been taken. */
+ 	set_bit(SGX_ENCL_CREATED, &encl->flags);
 +	sgx_nr_enclaves++;
+
  	return 0;
- 
- err_out:
-@@ -431,6 +440,8 @@ static int sgx_encl_add_page(struct sgx_encl *encl, unsigned long src,
- 	if (ret)
- 		goto err_out;
- 
-+	sgx_nr_added_pages++;
-+
- 	/*
- 	 * Complete the "add" before doing the "extend" so that the "add"
- 	 * isn't in a half-baked state in the extremely unlikely scenario the
-@@ -709,6 +720,7 @@ static int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
+
+@@ -261,6 +270,7 @@ static int __sgx_encl_add_page(struct sgx_encl *encl,
+
+ 	kunmap_atomic((void *)pginfo.contents);
+ 	put_page(src_page);
++    if (ret == 0) sgx_nr_added_pages++;
+
+ 	return ret ? -EIO : 0;
+ }
+@@ -603,6 +613,7 @@ static int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
  		ret = -EPERM;
  	} else {
- 		atomic_or(SGX_ENCL_INITIALIZED, &encl->flags);
+ 		set_bit(SGX_ENCL_INITIALIZED, &encl->flags);
 +		sgx_init_enclaves++;
  	}
- 
+
  err_out:
 diff --git a/driver/linux/main.c b/driver/linux/main.c
-index bd0c821..758b173 100644
+index a75969b..d2af993 100644
 --- a/driver/linux/main.c
 +++ b/driver/linux/main.c
-@@ -16,6 +16,7 @@
- #include <linux/module.h>
- #include "version.h"
- #include "dcap.h"
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
+ /*  Copyright(c) 2016-21 Intel Corporation. */
+
 +#include <linux/moduleparam.h>
- #ifndef MSR_IA32_FEAT_CTL
- #define MSR_IA32_FEAT_CTL MSR_IA32_FEATURE_CONTROL
- #endif
-@@ -30,6 +31,16 @@ static DECLARE_WAIT_QUEUE_HEAD(ksgxswapd_waitq);
- static LIST_HEAD(sgx_active_page_list);
- static DEFINE_SPINLOCK(sgx_active_page_list_lock);
- 
+ #include <linux/freezer.h>
+ #include <linux/highmem.h>
+ #include <linux/kthread.h>
+@@ -39,6 +40,16 @@ static LIST_HEAD(sgx_active_page_list);
+
+ static DEFINE_SPINLOCK(sgx_reclaimer_lock);
+
 +static unsigned int sgx_nr_total_epc_pages = 0;
 +static unsigned int sgx_nr_alloc_pages = 0;
 +static unsigned int sgx_nr_reclaimed = 0;
@@ -649,29 +633,29 @@ index bd0c821..758b173 100644
 +module_param(sgx_nr_reclaimed, uint, 0440);
 +module_param(sgx_nr_evicted, uint, 0440);
 +
- /**
-  * sgx_mark_page_reclaimable() - Mark a page as reclaimable
-  * @page:	EPC page
-@@ -319,6 +330,7 @@ static void sgx_reclaimer_write(struct sgx_epc_page *epc_page,
- 			if (ret)
- 				goto out;
- 
-+			sgx_nr_evicted++;  // races are acceptable..
- 			sgx_encl_ewb(encl->secs.epc_page, &secs_backing);
- 
- 			sgx_free_epc_page(encl->secs.epc_page);
-@@ -384,6 +396,7 @@ static void sgx_reclaim_pages(void)
- 
+ /*
+  * Reset dirty EPC pages to uninitialized state. Laundry can be left with SECS
+  * pages whose child pages blocked EREMOVE.
+@@ -302,6 +313,7 @@ static void sgx_reclaimer_write(struct sgx_epc_page *epc_page,
+ 		if (ret)
+ 			goto out;
+
++		sgx_nr_evicted++;  // races are acceptable..
+ 		sgx_encl_ewb(encl->secs.epc_page, &secs_backing);
+
+ 		sgx_free_epc_page(encl->secs.epc_page);
+@@ -373,6 +385,7 @@ static void sgx_reclaim_pages(void)
+
  		mutex_lock(&encl_page->encl->lock);
- 		encl_page->desc |= SGX_ENCL_PAGE_RECLAIMED;
+ 		encl_page->desc |= SGX_ENCL_PAGE_BEING_RECLAIMED;
 +		sgx_nr_reclaimed++;
  		mutex_unlock(&encl_page->encl->lock);
  		continue;
- 
-@@ -462,6 +475,17 @@ static unsigned long sgx_nr_free_pages(void)
+
+@@ -423,6 +436,18 @@ static unsigned long sgx_nr_free_pages(void)
  	return cnt;
  }
- 
+
 +static int get_sgx_nr_free_pages(char *buffer, const struct kernel_param *kp)
 +{
 +	return sprintf(buffer, "%lu\n", sgx_nr_free_pages());
@@ -683,24 +667,25 @@ index bd0c821..758b173 100644
 +
 +module_param_cb(sgx_nr_free_pages, &param_ops_sgx_nr_free_pages, NULL, 0440);
 +
++
  static bool sgx_should_reclaim(unsigned long watermark)
  {
  	return sgx_nr_free_pages() < watermark &&
-@@ -642,6 +666,7 @@ struct sgx_epc_page *sgx_alloc_epc_page(void *owner, bool reclaim)
- 		schedule();
- 	}
- 
-+	sgx_nr_alloc_pages++; // ignore races..
- 	if (sgx_should_reclaim(SGX_NR_LOW_PAGES))
- 		wake_up(&ksgxswapd_waitq);
- 
-@@ -780,6 +805,7 @@ static bool __init sgx_page_cache_init(void)
+@@ -623,6 +648,7 @@ struct sgx_epc_page *sgx_alloc_epc_page(void *owner, bool reclaim)
+ 	for ( ; ; ) {
+ 		page = __sgx_alloc_epc_page();
+ 		if (!IS_ERR(page)) {
++			sgx_nr_alloc_pages++; // ignore races..
+ 			page->owner = owner;
+ 			break;
  		}
- 
+@@ -746,6 +772,7 @@ static bool __init sgx_page_cache_init(void)
+ 		}
+
  		sgx_nr_epc_sections++;
 +		sgx_nr_total_epc_pages += (size / PAGE_SIZE);
  	}
- 
+
  	if (!sgx_nr_epc_sections) {
 diff --git a/driver/linux/show_values.sh b/driver/linux/show_values.sh
 new file mode 100755
@@ -731,7 +716,7 @@ index 0000000..af9e2d8
 +for metric in $METRICS ; do
 +    echo "$metric= `cat $MODPATH/$metric`"
 +done
--- 
+--
 2.25.1
 METRICS_PATCH_EOF
 )
@@ -793,10 +778,10 @@ VERSION_PATCH_EOF
 
 dcap_fsgsbase_patch_content=$(cat << 'FSGSBASE_PATCH_EOF'
 diff --git a/driver/linux/main.c b/driver/linux/main.c
-index bd0c821..4c68c9a 100644
+index a75969b..07d0bd8 100644
 --- a/driver/linux/main.c
 +++ b/driver/linux/main.c
-@@ -790,6 +790,26 @@ static bool __init sgx_page_cache_init(void)
+@@ -756,6 +756,26 @@ static bool __init sgx_page_cache_init(void)
  	return true;
  }
  
@@ -823,9 +808,9 @@ index bd0c821..4c68c9a 100644
  static int __init sgx_init(void)
  {
  	int ret;
-@@ -809,6 +829,14 @@ static int __init sgx_init(void)
+@@ -788,6 +808,14 @@ static int __init sgx_init(void)
  
- 	pr_info("intel_sgx: " DRV_DESCRIPTION " v" DRV_VERSION "\n");
+ 	pr_info(DRV_DESCRIPTION " v" DRV_VERSION "\n");
  
 +	if (boot_cpu_has(X86_FEATURE_FSGSBASE)) {
 +		if (!(__read_cr4() & X86_CR4_FSGSBASE)) {
@@ -838,10 +823,10 @@ index bd0c821..4c68c9a 100644
  	return 0;
  
  err_kthread:
-@@ -825,5 +853,9 @@ static void __exit sgx_exit(void)
- 	sgx_drv_exit();
- 	kthread_stop(ksgxswapd_tsk);
- 	sgx_page_cache_teardown();
+@@ -811,5 +839,9 @@ static void __exit sgx_exit(void)
+ 		vfree(sgx_epc_sections[i].pages);
+ 		memunmap(sgx_epc_sections[i].virt_addr);
+ 	}
 +	if (enabled_fsgsbase) {
 +		on_each_cpu(fsgsbase_disable, 0, 1);
 +		pr_info("intel_sgx: disabled fsgsbase extension\n");
@@ -849,25 +834,25 @@ index bd0c821..4c68c9a 100644
  }
  module_exit(sgx_exit);
 diff --git a/driver/linux/sgx.h b/driver/linux/sgx.h
-index 1a6ca5f..ede8b93 100644
+index a25137a..49cdcae 100644
 --- a/driver/linux/sgx.h
 +++ b/driver/linux/sgx.h
-@@ -41,6 +41,8 @@ struct sgx_epc_section {
+@@ -19,6 +19,8 @@
  #define SGX_NR_LOW_PAGES		32
  #define SGX_NR_HIGH_PAGES		64
  
 +#define PATCH_FSGSBASE 1
 +
- extern struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
+ /* Pages, which are being tracked by the page reclaimer. */
+ #define SGX_EPC_PAGE_RECLAIMER_TRACKED	BIT(0)
  
- static inline struct sgx_epc_section *sgx_get_epc_section(struct sgx_epc_page *page)
 FSGSBASE_PATCH_EOF
 )
 dcap_fsgsbase_patch_version=1
 
 # OOT & DCAP Commits
-oot_driver_commit="0373e2e8b96d9a261657b7657cb514f003f67094"
-dcap_driver_commit="c9b707408d14fc1f1dcc519950bafb8bc58f0f42"
+oot_driver_commit="2d2b795890c01069aab21d4cdfd1226f7f65b971"
+dcap_driver_commit="30fac05232e13eab72c425a7788fafa5a46b3247"
 
 # print the right color for each level
 #
