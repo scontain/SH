@@ -1,0 +1,406 @@
+#!/usr/bin/env bash
+
+: '
+Access to this file is granted under the SCONE COMMERCIAL LICENSE V1.0
+
+Any use of this product using this file requires a commercial license from scontain UG, www.scontain.com.
+
+Permission is also granted  to use the Program for a reasonably limited period of time  (but no longer than 1 month)
+for the purpose of evaluating its usefulness for a particular purpose.
+
+THERE IS NO WARRANTY FOR THIS PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN OTHERWISE STATED IN WRITING
+THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM PROVE DEFECTIVE,
+YOU ASSUME THE COST OF ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
+
+IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED ON IN WRITING WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MAY
+MODIFY AND/OR REDISTRIBUTE THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL,
+INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM INCLUDING BUT NOT LIMITED TO LOSS
+OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE
+WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+Copyright (C) 2022 scontain.com
+'
+
+set -e
+
+export RED='\e[31m'
+export BLUE='\e[34m'
+export ORANGE='\e[33m'
+export NC='\e[0m' # No Color
+
+
+function verbose () {
+    if [[ $V -eq 1 ]]; then
+        echo -e "${BLUE}- $@${NC}"
+    fi
+}
+
+function warning () {
+    echo -e "${ORANGE}WARNING: $@${NC}"
+}
+
+function error_exit() {
+  trap '' EXIT
+  echo -e "${RED}$1${NC}" 
+  exit 1
+}
+
+# print an error message on an error exit
+trap 'last_command=$current_command; current_command=$BASH_COMMAND' DEBUG
+trap 'if [ $? -ne 0 ]; then echo -e "${RED}\"${last_command}\" command failed - exiting.${NC}"; if [ $SERVICE_PID != 0 ] ; then kill $SERVICE_PID ; fi ; fi' EXIT
+
+
+export DEFAULT_NAMESPACE="default" # Default Kubernetes namespace to use
+export export DEFAULT_DCAP_KEY="aecd5ebb682346028d60c36131eb2d92"  # Default DCAP API Key to used
+export OWNER_FILE=""  # Default owner config file
+
+SERVICE_PID=0
+help_flag="--help"
+ns_flag="--namespace"
+ns_short_flag="-n"
+dcap_flag="--dcap-api"
+dcap_short_flag="-d"
+verbose_flag="-v"
+verbose=""
+owner_flag="--owner-config"
+owner_short_flag="-o"
+verbose=""
+debug_flag="--debug"
+debug_short_flag="-d"
+debug=""
+target_flag="--target"
+
+ns="$DEFAULT_NAMESPACE"
+repo="$APP_IMAGE_REPO"
+DCAP_KEY="$DEFAULT_DCAP_KEY"  # Default DCAP API Key to used
+TARGET_DIR="$HOME/.cas" # Default target directory
+SVC=""
+NAME=""
+
+usage ()
+{
+  echo ""
+  echo "Usage:"
+  echo "  kubectl provision SVC [NAME] [$ns_flag <kubernetes-namespace>] [$dcap_flag <API Key>] [$owner_flag <owner config>] [$verbose_flag] [$help_flag]"
+  echo ""
+  echo "Arguments:"
+  echo "  Service to provision: SVC = cas | vault"
+  echo "    - cas: provision CAS instance using the SCONE operator"
+  echo "    - vault: provision a confidential Vault instance using the SCONE operator"
+  echo ""
+  echo "  Name of the service: NAME"
+  echo "    - If no name is specified, we set NAME=SVC"
+  echo ""
+  echo "Options:"
+  echo "    $ns_short_flag | $ns_flag"
+  echo "                  The Kubernetes namespace in which the service should be deployed on the cluster."
+  echo "                  Default value: \"$DEFAULT_NAMESPACE\""
+  echo "    $dcap_flag | $dcap_short_flag"
+  echo "                  DCAP API Key - recommended when provisioning CAS. We use a default otherwise. Ignored for all other services."
+  echo "                  Default value is a shared API key that might stop working at any point in time: DCAP KEY=\"$DCAP_KEY\""
+  echo "    $owner_flag | $owner_short_flag"
+  echo "                  Provide a specific owner config when provisioning the CAS instance."
+  echo "                  By default, we provision for a NodePort. If you want to use a loadBalancer, you need to provide an"
+  echo "                  owner config."
+  echo "    $target_flag"
+  echo "                  Specify target directory for output files. Default path=\"$TARGET_DIR\"."
+  echo "    $verbose_flag"
+  echo "                  Enable verbose output"
+  echo "    $debug_flag | debug_short_flag"
+  echo "                  Create debug image instead of a production image"
+  echo "    $help_flag"
+  echo "                  Output this usage information and exit."
+  echo ""
+}
+
+##### Parsing arguments
+
+while [[ "$#" -gt 0 ]]; do
+  case $1 in
+    ${ns_flag} | ${ns_short_flag})
+      ns="$2"
+      if [ ! -n "${ns}" ]; then
+        usage
+        error_exit "Error: The namespace '$ns' is invalid."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${dcap_flag} | ${dcap_short_flag})
+      DCAP_KEY="$2"
+      if [ ! -n "${DCAP_KEY}" ]; then
+        usage
+        error_exit "Error: Please specify a valid DCAP_KEY ('$DCAP_KEY' is invalid)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${owner_flag} | ${owner_short_flag})
+      OWNER_FILE="$2"
+      if [ ! -n "${OWNER_FILE}" ]; then
+        usage
+        error_exit "Error: Please specify a valid owner file ('$OWNER_FILE' is invalid)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${target_flag})
+      TARGET_DIR="$2"
+      if [ ! -w "${TARGET_DIR}" ]; then
+        usage
+        error_exit "Error: Please specify a valid owner file ('$TARGET_DIR' is not writeable)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${verbose_flag})
+      V=1
+      shift # past argument
+      ;;
+    ${debug_flag} | ${debug_short_flag})
+      set -x
+      shift # past argument
+      ;;
+    $help_flag)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ "${SVC}" == "" ]]; then
+        SVC="$1"
+      elif [[ "${NAME}" == "" ]]; then
+        NAME="$1"
+      else
+        usage
+        error_exit "Error: Unknown parameter passed: $1";
+      fi
+      shift # past argument
+      ;;
+  esac
+done
+
+if [[ "${SVC}" != "cas" && "${SVC}" != "vault"  ]]; then
+    usage
+    error_exit "Error: Please specify a valid SVC ('$SVC' is invalid)."
+fi
+
+if [[ "$NAME" == "" ]] ; then
+  verbose "No service NAME specified - using '$SVC' as NAME"
+  NAME="$SVC"
+fi
+
+if ! kubectl get namespace "$ns" > /dev/null 2>/dev/null
+then
+  error_exit "Namespace '$ns' does not exist."
+fi
+
+if [ "$SVC" == "cas" ] ; then
+   verbose "Provisioning service 'cas': NAME = '$NAME' in namespace '$ns' using DCAP-API Key '$DCAP_KEY'" 
+
+  if [[ "$DCAP_KEY" == "$DEFAULT_DCAP_KEY" ]] ; then
+    warning  "No DCAP API Key specified! Using default - this is not recommended for production!"
+  fi
+
+
+export SCONE_CLI_MRENCLAVE="$(docker run -t --rm --entrypoint scone -e SCONE_HASH=1 registry.scontain.com/scone.cloud/backup-controller cas)"
+export POLICY_NAME="$NAME-backup-controller-$RANDOM$RANDOM"
+export BACKUPCONTROLLER="$NAME-backup-controller" 
+
+export SVC_DNS_NAME="$NAME.$ns.svc.cluster.local"
+if kubectl get pvc "database-$NAME-0"  --namespace "$ns" 2> /dev/null 1> /dev/null ; then
+   warning "Volume $database-$NAME-0 already exists - provision of CAS for existing volume not supported: We do not want to overwrite existing database"
+   exit 1
+fi
+
+if [[ -d $NAME ]] ; then
+    warning "Directory $NAME already exists - we cannot provision for same NAME again. Delete $NAME or use a different name."
+    exit 1
+fi
+
+mkdir -p "$TARGET_DIR/owner-config"
+mkdir -p "$TARGET_DIR/identity"
+
+export manifest_provsioning="$TARGET_DIR/owner-config/cas-$ns-$NAME-provisioning-step.yaml"
+
+verbose "Creating manifest '$manifest_provsioning' for CAS provsioning"
+
+cat > "$manifest_provsioning" <<EOF
+apiVersion: services.scone.cloud/v1beta1
+kind: CAS
+metadata:
+  name: $NAME
+  namespace: $ns
+spec:
+  image: registry.scontain.com/scone.cloud/cas
+  imagePullSecrets:
+    - name: sconeapps
+  service:
+    type: NodePort
+  imagePullPolicy: Always
+  persistence:
+    enabled: true
+EOF
+
+verbose "Creating/Appling CAS CR for Provisioning"
+
+kubectl apply -f "$manifest_provsioning"
+
+until kubectl get pods "$NAME-0" --namespace "$ns" 2> /dev/null | grep "Running"
+do
+     sleep 5
+     echo "Waiting for CAS pod $NAME-0 to start"
+done
+
+until kubectl logs "$NAME-0" --namespace "$ns" | grep "CAS key hash"
+do
+    sleep 2
+    echo "Waiting for CAS key"
+done
+
+export CAS_KEY_HASH=$(kubectl logs "$NAME-0"  --namespace "$ns" | grep "CAS key hash" | awk '{ print $7 } ')
+export CAS_PROVISIONING_TOKEN=$(kubectl logs "$NAME-0"  --namespace "$ns" | grep "CAS provisioning token" | awk ' { print $7 } ')
+
+echo CAS_PROVISIONING_TOKEN=$CAS_PROVISIONING_TOKEN
+echo CAS_KEY_HASH=$CAS_KEY_HASH
+
+verbose "determining the CAS address"
+export SCONE_CAS_ADDR=$(kubectl get svc --namespace "$ns" "$NAME" --template "{{ .spec.clusterIP }}")
+
+verbose " CAS address = $SCONE_CAS_ADDR"
+
+if [[ "$SCONE_CAS_ADDR" == "" ]] ; then
+   error_exit "Failed to determine IP address of service $NAME in namespace $ns"
+fi
+
+CONFIG_FILE="$TARGET_DIR/owner-config/config.toml"
+cat > "$CONFIG_FILE" <<EOF
+[api_identity]
+common_name = "$SVC_DNS_NAME"
+alt_names = ["$NAME",  "$NAME.$ns.svc.cluster.local", "$NAME.default", "localhost", "$SCONE_CAS_ADDR"]
+
+[dcap]
+subscription_key = "$DCAP_KEY"
+
+[audit_log]
+mode = "signed"
+sink = "file"
+EOF
+
+sleep 5
+kubectl port-forward service/$NAME 8081:8081 --address='0.0.0.0'  --namespace "$ns" &
+SERVICE_PID=$!
+sleep 5
+
+docker run -it --rm \
+    --network=host \
+    --add-host=host.docker.internal:host-gateway \
+    -v "$TARGET_DIR/"/identity:/identity \
+    -v "$TARGET_DIR"/owner-config:/owner-config \
+    -e SCONE_CLI_CONFIG="/identity/config.json" \
+    -e CAS_KEY_HASH="$CAS_KEY_HASH" \
+    -e CAS_PROVISIONING_TOKEN="$CAS_PROVISIONING_TOKEN" \
+    -e SCONE_CAS_ADDR="host.docker.internal" \
+    -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
+    -e POLICY_NAME="$POLICY_NAME" \
+    registry.scontain.com/scone.cloud/sconecli scone cas provision host.docker.internal \
+    -c $CAS_KEY_HASH \
+    --token $CAS_PROVISIONING_TOKEN \
+    --config-file /owner-config/config.toml \
+    with-attestation \
+    --accept-group-out-of-date \
+
+sed 's/^/          /' "$TARGET_DIR/identity/config.json" >  "$TARGET_DIR/identity/owner_id.json"
+export OWNER_IDENTITY=$(sed "s/host.docker.internal/$SVC_DNS_NAME/" "$TARGET_DIR/identity/owner_id.json")
+
+
+BACKUP_POLICY="$TARGET_DIR/identity/backup-controller-session-$POLICY_NAME.yaml"
+cat > "$BACKUP_POLICY" <<EOF
+name: $POLICY_NAME
+version: "0.3"
+
+security:
+  attestation:
+    tolerate: [debug-mode, outdated-tcb]
+
+services:
+  - name: register
+    image_name: cli
+    attestation:
+      - mrenclave: [$SCONE_CLI_MRENCLAVE]
+    command: "scone cas register-backup @@3"
+    environment:
+      SCONE_MODE: hw
+      SCONE_LOG: error
+      SCONE_CLI_CONFIG: /etc/owner-identity.json
+      \@\@SCONE_LAS_ADDR: ""
+    pwd: /
+
+images:
+  - name: cli
+    injection_files:
+      - path: /etc/owner-identity.json
+        content: |
+$OWNER_IDENTITY
+EOF
+
+docker run -it --rm \
+    --network=host \
+    --add-host=host.docker.internal:host-gateway \
+    -v "$TARGET_DIR"/identity:/identity \
+    -v "$TARGET_DIR"/owner-config:/owner-config \
+    -e SCONE_CLI_CONFIG="/identity/config.json" \
+    -e SCONE_CAS_ADDR="host.docker.internal" \
+    -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
+    -e POLICY_NAME="$POLICY_NAME" \
+    registry.scontain.com/scone.cloud/sconecli \
+    sh -c "scone cas attest -G host.docker.internal; scone cas set-default host.docker.internal ; scone session create /identity/backup-controller-session-$POLICY_NAME.yaml"
+
+# todo: use encrypted policy and upload encrypted policy
+
+kubectl get cas $NAME  --namespace "$ns"
+
+export cas_manifest="$TARGET_DIR/owner-config/cas-$ns-$NAME-manifest.yaml"
+
+verbose "Creating manifest '$cas_manifest' for CAS provsioning"
+
+cat > "$cas_manifest" <<EOF
+apiVersion: services.scone.cloud/v1beta1
+kind: CAS
+metadata:
+  name: $NAME
+  namespace: $ns
+spec:
+  image: registry.scontain.com/scone.cloud/cas
+  imagePullSecrets:
+    - name: sconeapps
+  service:
+    type: NodePort
+  imagePullPolicy: Always
+  persistence:
+    enabled: true
+  backup-controller:
+    enabled: true
+    session: $POLICY_NAME/register
+    image: "registry.scontain.com/scone.cloud/backup-controller"
+# todo:
+#  livenessProbe:
+#    enabled: false #todo
+#    failureThreshold: 5
+#    periodSeconds: 60
+#  networkPolicy:
+#    enabled: true
+EOF
+
+verbose "Creating/Appling CAS CR for Production"
+
+kubectl apply -f "$cas_manifest"
+
+kill $SERVICE_PID
+
+else 
+   warning "Unimplemented!"
+   exit 1
+fi
