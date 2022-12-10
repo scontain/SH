@@ -409,20 +409,21 @@ else
 fi
 
 
-verbose "Checking the existing of the plugin"
+verbose "Checking if the plugin exists"
 
 Fixit=$UPDATE
 kubectl provision cas --help > /dev/null 2>/dev/null || Fixit=1
 
 if [[ Fixit != 0 ]] ; then
-    verbose "  SCONE kubectl plugin does not exist or should be updated"
+    warning "  SCONE kubectl plugin does not exist or should be updated"
     if [[ $FIX == 1 ]] ; then
         if [[ "$PLUGINBIN" == "" || ! -w  "$PLUGINBIN" ]] ; then
             error_exit "cannot write to binary $PLUGINBIN: please specify writable path '$plugin_flag <PATH>'"
         else
             echo "Storing kubectl plugin in directory $PLUGINBIN"
             verbose "  Fixing kubectl plugin - downloading $KUBECTLPLUGIN to file $PLUGINBIN "
-            echo curl -fsSL "$KUBECTLPLUGIN"  -o $PLUGINBIN
+            curl -fsSL "$KUBECTLPLUGIN"  -o "$PLUGINBIN"
+            chmod a+x "$PLUGINBIN"
         fi
     fi
 else
