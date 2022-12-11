@@ -56,7 +56,8 @@ trap 'if [ $? -ne 0 ]; then echo -e "${RED}\"${last_command}\" command failed - 
 
 CERT_MANAGER="https://github.com/cert-manager/cert-manager/releases/download/v1.10.1/cert-manager.yaml"
 DEFAULT_NAMESPACE="scone-system"
-HELM_CHART="https://github.com/scontain/operator/archive/refs/tags/v0.0.7.tar.gz"
+#HELM_CHART="https://github.com/scontain/operator/archive/refs/tags/v0.0.7.tar.gz"
+HELM_CHART="https://raw.githubusercontent.com/scontain/operator/main/latest.tgz"
 LAS_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/base_v1beta1_las.yaml"
 SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/base_v1beta1_sgxplugin.yaml"
 REGISTRY="registry.scontain.com"

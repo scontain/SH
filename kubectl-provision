@@ -63,11 +63,10 @@ ns_flag="--namespace"
 ns_short_flag="-n"
 dcap_flag="--dcap-api"
 dcap_short_flag="-d"
-verbose_flag="-v"
-verbose=""
+verbose_short_flag="-v"
+verbose_flag="--verbose"
 owner_flag="--owner-config"
 owner_short_flag="-o"
-verbose=""
 debug_flag="--debug"
 debug_short_flag="-d"
 debug=""
@@ -106,8 +105,8 @@ usage ()
   echo "                  By default, we provision for a NodePort. If you want to use a loadBalancer, you need to provide an"
   echo "                  owner config."
   echo "    $target_flag"
-  echo "                  Specify target directory for output files. Default path=\"$TARGET_DIR\"."
-  echo "    $verbose_flag"
+  echo "                  Specify target directory for generated manifests and owner IDs. Default path=\"$TARGET_DIR\"."
+  echo "    $verbose_short_flag | $verbose_flag"
   echo "                  Enable verbose output"
   echo "    $debug_flag | debug_short_flag"
   echo "                  Create debug image instead of a production image"
@@ -156,7 +155,7 @@ while [[ "$#" -gt 0 ]]; do
       shift # past argument
       shift || true # past value
       ;;
-    ${verbose_flag})
+    ${verbose_flag}|${verbose_short_flag})
       V=1
       shift # past argument
       ;;
@@ -242,6 +241,10 @@ spec:
   imagePullPolicy: Always
   persistence:
     enabled: true
+  databaseSnapshots:
+    enabled: true
+    persistence:
+      enabled: true
 EOF
 
 verbose "Creating/Appling CAS CR for Provisioning"
@@ -385,11 +388,24 @@ spec:
     enabled: true
     session: $POLICY_NAME/register
     image: "registry.scontain.com/scone.cloud/backup-controller"
-# todo:
-#  livenessProbe:
-#    enabled: false #todo
+  livenessProbe:
+    enabled: true
 #    failureThreshold: 5
 #    periodSeconds: 60
+#    timeoutSeconds: 60
+#    initialDelaySeconds: 30
+  startupProbe:
+     enabled: true
+#    failureThreshold: 5
+#    periodSeconds: 60
+#    timeoutSeconds: 60
+#    initialDelaySeconds: 30
+  attestedCLIProbes: true
+  databaseSnapshots:
+    enabled: true
+    persistence:
+      enabled: true
+# todo:
 #  networkPolicy:
 #    enabled: true
 EOF
