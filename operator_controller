@@ -61,6 +61,10 @@ LAS_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/b
 SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/base_v1beta1_sgxplugin.yaml"
 REGISTRY="registry.scontain.com"
 KUBECTLPLUGIN="https://raw.githubusercontent.com/scontain/SH/master/kubectl-provision"
+IMPS_HELM_CHART="banzaicloud-stable/imagepullsecrets"
+IMPS_HELM_REPO="banzaicloud-stable https://kubernetes-charts.banzaicloud.com"
+
+VERSION="12.12.2022"
 
 # Functions to fix state
 
@@ -121,7 +125,7 @@ function check_secret {
             fi
         fi
     else
-        verbose "  Secret '$secret' alrady exists in namespace '$namespace'."
+        verbose "  Secret '$secret' already exists in namespace '$namespace'."
     fi
 }
 
@@ -130,13 +134,14 @@ function check_secret {
 help_flag="--help"
 ns_flag="--namespace"
 ns_short_flag="-n"
-fix_flag="--fix"
-fix_short_flag="-f"
+fix_flag="--reconcile"
+fix_short_flag="-r"
 cr_flag="--create"
 cr_short_flag="-c"
 update_flag="--update"
 update_short_flag="-u"
-verbose_flag="-v"
+verbose_flag="--verbose"
+verbose_short_flag="-v"
 verbose=""
 owner_flag="--owner-config"
 owner_short_flag="-o"
@@ -147,7 +152,9 @@ debug=""
 user_flag="--username"
 token_flag="--access-token"
 email_flag="--email"
+deploy_plugin_flag="--plugin"
 plugin_flag="--plugin-path"
+secret_operator_flag="--secret-operator"
 
 ns="$DEFAULT_NAMESPACE"
 repo="$APP_IMAGE_REPO"
@@ -161,6 +168,8 @@ NAME=""
 REGISTRY_USERNAME=""
 REGISTRY_ACCESS_TOKEN=""
 REGISTRY_EMAIL=""
+PLUGIN=0
+SECRET_OPERATOR=1
 
 # find directory on path where we are permitted to copy the plugin to
 
@@ -175,10 +184,10 @@ usage ()
 {
   echo ""
   echo "Usage:"
-  echo "  check_scone_operator"
+  echo "  operator_controller [OPTIONS]"
   echo ""
   echo "Objectives:"
-  echo "  - Checks if the SCONE operator and all its prerequisites are available."
+  echo "  - Checks if the SCONE operator and all its dependencies are available."
   echo "  - Tries to fix any issues it discovers if flag '--fix' is set."
   echo "  - Tries to update all components in case flag '--update' is set (even if everything is ok)."
   echo "  - Creates a namespace for a service if flag --create NAMESPACE is set."
@@ -189,13 +198,13 @@ usage ()
   echo "                  Try to fix all warnings that we discover."
   echo "                  The default is to warn about potential issues only."
   echo "    $update_flag | $update_short_flag"
-  echo "                  Try to update all prerequisites of the SCONE operator."
+  echo "                  Try to update all dependencies of the SCONE operator."
   echo "                  independently if they need fixing."
-  echo "    $ns_short_flag | $ns_flag"
+  echo "    $ns_short_flag | $ns_flag NAMESPACE"
   echo "                  The Kubernetes namespace in which the SCONE operator should be deployed on the cluster."
   echo "                  Default value: \"$DEFAULT_NAMESPACE\""
-  echo "    $cr_short_flag | $cr_flag"
-  echo "                  Create a namespace for provisioning SCONE CAS (or another service)."
+  echo "    $cr_short_flag | $cr_flag NAMESPACE"
+  echo "                  Create namespace \"NAMESPACE\" for provisioning SCONE CAS (or another service)."
   echo "    $user_flag REGISTRY_USERNAME"
   echo "                  To create/update/fix the pull secrets ('sconeapps' and 'scone-operator-pull'), "
   echo "                  one needs to specify the user name, access token, and email of the registry."
@@ -204,15 +213,30 @@ usage ()
   echo "                  The access token of the pull secret."
   echo "    $email_flag REGISTRY_EMAIL"
   echo "                  The email address belonging to the pull secret."
-  echo "    $plugin_flag"
+  echo "    $deploy_plugin_flag"
+  echo "                  Include the kubectl plugin in the reconciliation and updates."
+  echo "    $plugin_flag PATH"
   echo "                  Path where we should write the plugin binary. The path must be writeable. Default value: \"$PLUGINBIN\""
-  echo "    $verbose_flag"
+  echo "    $secret_operator_flag"
+  echo "                  Check/Reconcile/Update the Secret Operator"
+  echo "    $verbose_short_flag | $verbose_flag"
   echo "                  Enable verbose output"
   echo "    $debug_flag | debug_short_flag"
   echo "                  Create debug image instead of a production image"
   echo "    $help_flag"
   echo "                  Output this usage information and exit."
   echo ""
+  echo "Configuration:"
+  echo "  - CERT_MANAGER=$CERT_MANAGER"
+  echo "  - DEFAULT_NAMESPACE=$DEFAULT_NAMESPACE"
+  echo "  - HELM_CHART=$HELM_CHART"
+  echo "  - LAS_MANIFEST=$LAS_MANIFEST"
+  echo "  - SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
+  echo "  - REGISTRY=$REGISTRY"
+  echo "  - KUBECTLPLUGIN=$KUBECTLPLUGIN"
+  echo "  - IMPS_HELM_CHART=$IMPS_HELM_CHART"
+  echo "  - IMPS_HELM_REPO=$IMPS_HELM_REPO"
+  echo "  - VERSION=$VERSION"
 }
 
 ##### Parsing arguments
@@ -277,16 +301,24 @@ while [[ "$#" -gt 0 ]]; do
       FIX=1
       shift # past argument
       ;;
+    ${deploy_plugin_flag})
+      PLUGIN=1
+      shift # past argument
+      ;;
     ${update_flag} | ${update_short_flag})
       UPDATE=1
       shift # past argument
       ;;
-    ${verbose_flag})
+    $verbose_short_flag | $verbose_flag)
       V=1
       shift # past argument
       ;;
     ${debug_flag} | ${debug_short_flag})
       set -x
+      shift # past argument
+      ;;
+    ${secret_operator_flag})
+      SECRET_OPERATOR=1
       shift # past argument
       ;;
     $help_flag)
@@ -414,18 +446,43 @@ verbose "Checking if the plugin exists"
 Fixit=$UPDATE
 kubectl provision cas --help > /dev/null 2>/dev/null || Fixit=1
 
-if [[ Fixit != 0 ]] ; then
-    warning "  SCONE kubectl plugin does not exist or should be updated"
+if [[ $Fixit != 0 ]] ; then
+    warning "SCONE kubectl plugin does not exist or should be updated"
     if [[ $FIX == 1 ]] ; then
-        if [[ "$PLUGINBIN" == "" || ! -w  "$PLUGINBIN" ]] ; then
-            error_exit "cannot write to binary $PLUGINBIN: please specify writable path '$plugin_flag <PATH>'"
-        else
-            echo "Storing kubectl plugin in directory $PLUGINBIN"
-            verbose "  Fixing kubectl plugin - downloading $KUBECTLPLUGIN to file $PLUGINBIN "
-            curl -fsSL "$KUBECTLPLUGIN"  -o "$PLUGINBIN"
-            chmod a+x "$PLUGINBIN"
+        if [[ $PLUGIN == 0 ]] ; then
+            warning "set $deploy_plugin_flag to reconcile the plugin"
+        else 
+            if [[ "$PLUGINBIN" == "" || ! -w  "$PLUGINBIN" ]] ; then
+                error_exit "cannot write to binary $PLUGINBIN: please specify writable path '$plugin_flag <PATH>'"
+            else
+                verbose "Storing kubectl plugin in directory $PLUGINBIN"
+                verbose "  Fixing kubectl plugin - downloading $KUBECTLPLUGIN to file $PLUGINBIN "
+                curl -fsSL "$KUBECTLPLUGIN"  -o "$PLUGINBIN"
+                chmod a+x "$PLUGINBIN"
+            fi
         fi
     fi
 else
-    verbose "  SCONE kubectl plugin already installed"
+    verbose "  SCONE kubectl plugin is already installed"
+fi
+
+if [[ $SECRET_OPERATOR == 1 ]] ; then
+    verbose "Checking if the secret operator exists"
+
+    SO=`helm list -A | grep scone-imps | wc -l | sed 's/^[[:space:]]*//g'`
+
+    if [[ $UPDATE == 1 && $SO != "0" ]] ; then
+        verbose "  Updating the Secret Operator"
+        helm repo add --force-update $IMPS_HELM_REPO
+        helm upgrade scone-imps $IMPS_HELM_CHART --namespace $ns
+    fi
+
+    if [[ $SO == "0" ]] ; then
+        warning "SCONE operator not installed!"
+        if [[ $FIX == 1 ]] ; then
+            verbose "  Fixing the SCONE Operator"
+            helm repo add $IMPS_HELM_REPO
+            helm install scone-imps $IMPS_HELM_CHART --namespace $ns
+        fi
+    fi
 fi
