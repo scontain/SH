@@ -263,8 +263,8 @@ while [[ "$#" -gt 0 ]]; do
       shift || true # past value
       ;;
     ${plugin_flag})
-      REGISTRY_PLUGINBINUSERNAME="$2"
-      if [ ! -w "${PLUGINBIN}" || ! -d "${PLUGINBIN}" ]; then
+      PLUGINBIN="$2"
+      if [ ! -n "${PLUGINBIN}" ]; then
         usage
         error_exit "Error: Please specify a valid plugin path ('$PLUGINBIN' is invalid)."
       fi
@@ -451,14 +451,14 @@ if [[ $Fixit != 0 ]] ; then
     warning "SCONE kubectl plugin does not exist or should be updated"
     if [[ $FIX == 1 ]] ; then
         if [[ $PLUGIN == 0 ]] ; then
-            warning "set $deploy_plugin_flag to reconcile the plugin"
-        else 
-            if [[ "$PLUGINBIN" == "" || ! -w  "$PLUGINBIN" ]] ; then
+            warning "set flag $deploy_plugin_flag to reconcile the plugin"
+        else
+            if [[ "$PLUGINBIN" == ""  ]] ; then
                 error_exit "cannot write to binary $PLUGINBIN: please specify writable path '$plugin_flag <PATH>'"
             else
                 verbose "Storing kubectl plugin in directory $PLUGINBIN"
-                verbose "  Fixing kubectl plugin - downloading $KUBECTLPLUGIN to file $PLUGINBIN "
-                curl -fsSL "$KUBECTLPLUGIN"  -o "$PLUGINBIN"
+                verbose "  Fixing kubectl plugin - downloading $KUBECTLPLUGIN to file $PLUGINBIN"
+                curl -fsSL "$KUBECTLPLUGIN"  -o "$PLUGINBIN" || error_exit "Failed to download and install kubectl plugin"
                 chmod a+x "$PLUGINBIN"
             fi
         fi
