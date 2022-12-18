@@ -52,20 +52,75 @@ function error_exit() {
 trap 'last_command=$current_command; current_command=$BASH_COMMAND' DEBUG
 trap 'if [ $? -ne 0 ]; then echo -e "${RED}\"${last_command}\" command failed - exiting.${NC}" ; fi' EXIT
 
-# CONFIG SECTION
+# CONFIG SECTION - can only change via environment variables (and not yet via flags)
 
-CERT_MANAGER="https://github.com/cert-manager/cert-manager/releases/download/v1.10.1/cert-manager.yaml"
-DEFAULT_NAMESPACE="scone-system"
-#HELM_CHART="https://github.com/scontain/operator/archive/refs/tags/v0.0.7.tar.gz"
-HELM_CHART="https://raw.githubusercontent.com/scontain/operator/main/latest.tgz"
-LAS_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/base_v1beta1_las.yaml"
-SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/base_v1beta1_sgxplugin.yaml"
-REGISTRY="registry.scontain.com"
-KUBECTLPLUGIN="https://raw.githubusercontent.com/scontain/SH/master/kubectl-provision"
-IMPS_HELM_CHART="banzaicloud-stable/imagepullsecrets"
-IMPS_HELM_REPO="banzaicloud-stable https://kubernetes-charts.banzaicloud.com"
+CONFIG_FILE="operator_controller_config"
 
-VERSION="12.12.2022"
+# NOTE: verbose will only show up if you execute with "V=1 ./operator_controller" 
+source "$CONFIG_FILE" || verbose "Note: could not load config file \"$CONFIG_FILE\" - Ignoring."
+
+if [[ "$VERSION" == "" ]] ; then
+    VERSION="latest"
+else
+    warning "Using external VERSION=$VERSION"
+fi
+
+
+if [[ "$CERT_MANAGER" == "" ]] ; then
+    CERT_MANAGER="https://github.com/cert-manager/cert-manager/releases/download/v1.10.1/cert-manager.yaml"
+else
+    warning "Using external CERT_MANAGER=$CERT_MANAGER"
+fi
+
+if [[ "$DEFAULT_NAMESPACE" == "" ]] ; then
+    DEFAULT_NAMESPACE="scone-system"
+else
+    warning "Using external DEFAULT_NAMESPACE=$DEFAULT_NAMESPACE"
+fi
+
+if [[ "$HELM_CHART" == "" ]] ; then
+    HELM_CHART="https://raw.githubusercontent.com/scontain/operator/main/$VERSION.tgz"
+else
+    warning "Using external HELM_CHART=$HELM_CHART"
+fi
+
+if [[ "$LAS_MANIFEST" == "" ]] ; then
+    LAS_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/base_v1beta1_las.yaml"
+else
+    warning "Using external LAS_MANIFEST=$LAS_MANIFEST"
+fi
+
+if [[ "$SGXPLUGIN_MANIFEST" == "" ]] ; then
+    SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/base_v1beta1_sgxplugin.yaml"
+else
+    warning "Using external SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
+fi
+
+if [[ "$REGISTRY" == "" ]] ; then
+    REGISTRY="registry.scontain.com"
+else
+    warning "Using external REGISTRY=$REGISTRY"
+fi
+
+if [[ "$IMPS_HELM_CHART" == "" ]] ; then
+    IMPS_HELM_CHART="banzaicloud-stable/imagepullsecrets"
+else
+    warning "Using external IMPS_HELM_CHART=$IMPS_HELM_CHART"
+fi
+
+if [[ "$KUBECTLPLUGIN" == "" ]] ; then
+    KUBECTLPLUGIN="https://raw.githubusercontent.com/scontain/SH/master/kubectl-provision"
+else
+    warning "Using external KUBECTLPLUGIN=$KUBECTLPLUGIN"
+fi
+
+if [[ "$IMPS_HELM_REPO" == "" ]] ; then
+    IMPS_HELM_REPO="banzaicloud-stable https://kubernetes-charts.banzaicloud.com"
+else
+    warning "Using external IMPS_HELM_REPO=$IMPS_HELM_REPO"
+fi
+
+
 
 # Functions to fix state
 
@@ -156,6 +211,7 @@ email_flag="--email"
 deploy_plugin_flag="--plugin"
 plugin_flag="--plugin-path"
 secret_operator_flag="--secret-operator"
+version_flag="--version"
 
 ns="$DEFAULT_NAMESPACE"
 repo="$APP_IMAGE_REPO"
@@ -224,10 +280,12 @@ usage ()
   echo "                  Enable verbose output"
   echo "    $debug_flag | debug_short_flag"
   echo "                  Create debug image instead of a production image"
+  echo "    $version_flag"
+  echo "                  Set the version of the helm chart"
   echo "    $help_flag"
   echo "                  Output this usage information and exit."
   echo ""
-  echo "Configuration:"
+  echo "Default Configuration: "
   echo "  - CERT_MANAGER=$CERT_MANAGER"
   echo "  - DEFAULT_NAMESPACE=$DEFAULT_NAMESPACE"
   echo "  - HELM_CHART=$HELM_CHART"
@@ -238,6 +296,7 @@ usage ()
   echo "  - IMPS_HELM_CHART=$IMPS_HELM_CHART"
   echo "  - IMPS_HELM_REPO=$IMPS_HELM_REPO"
   echo "  - VERSION=$VERSION"
+  echo "You can overwrite the defaults by setting these environment variables before executing this script."
 }
 
 ##### Parsing arguments
@@ -285,6 +344,16 @@ while [[ "$#" -gt 0 ]]; do
       if [ ! -n "${REGISTRY_ACCESS_TOKEN}" ]; then
         usage
         error_exit "Error: Please specify a valid REGISTRY ACCESS TOKEN ('$REGISTRY_ACCESS_TOKEN' is invalid)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${version_flag})
+      VERSION="$2"
+      HELM_CHART="https://raw.githubusercontent.com/scontain/operator/main/$VERSION.tgz"
+      if [ ! -n "${VERSION}" ]; then
+        usage
+        error_exit "Error: Please specify a valid VERSION ('$VERSION' is invalid)."
       fi
       shift # past argument
       shift || true # past value
@@ -445,10 +514,12 @@ fi
 verbose "Checking if the kubectl plugin exists"
 
 Fixit=$UPDATE
-kubectl provision cas --help > /dev/null 2>/dev/null || Fixit=1
+kubectl provision cas --help > /dev/null 2>/dev/null || Fixit=2
 
 if [[ $Fixit != 0 ]] ; then
-    warning "SCONE kubectl plugin does not exist or should be updated"
+    if [[ $Fixit == 2 ]] ; then
+        warning "SCONE kubectl plugin does not exist - must be deployed"
+    fi
     if [[ $FIX == 1 ]] ; then
         if [[ $PLUGIN == 0 ]] ; then
             warning "set flag $deploy_plugin_flag to reconcile the kubectl plugin"

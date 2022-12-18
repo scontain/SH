@@ -208,25 +208,35 @@ export SCONE_CLI_MRENCLAVE="$(docker run -t --rm --entrypoint scone -e SCONE_HAS
 export POLICY_NAME="$NAME-backup-controller-$RANDOM$RANDOM"
 export BACKUPCONTROLLER="$NAME-backup-controller" 
 
-export SVC_DNS_NAME="$NAME.$ns.svc.cluster.local"
-if kubectl get pvc "database-$NAME-0"  --namespace "$ns" 2> /dev/null 1> /dev/null ; then
-   warning "Volume $database-$NAME-0 already exists - provision of CAS for existing volume not supported: We do not want to overwrite existing database"
-   exit 1
-fi
 
-if [[ -d $NAME ]] ; then
-    warning "Directory $NAME already exists - we cannot provision for same NAME again. Delete $NAME or use a different name."
+verbose "checking if CAS already exists"
+
+EXISTS=1 kubectl get cas "$NAME" --namespace "$ns" &>/dev/null || EXISTS=0
+
+if [[ $EXISTS == 0 ]] ; then
+
+  verbose "CAS $NAME does not exists - creating it"
+
+  export SVC_DNS_NAME="$NAME.$ns.svc.cluster.local"
+  if kubectl get pvc "database-$NAME-0"  --namespace "$ns" 2> /dev/null 1> /dev/null ; then
+    warning "Volume $database-$NAME-0 already exists - provision of CAS for existing volume not supported: We do not want to overwrite existing database"
     exit 1
-fi
+  fi
 
-mkdir -p "$TARGET_DIR/owner-config"
-mkdir -p "$TARGET_DIR/identity"
 
-export manifest_provsioning="$TARGET_DIR/owner-config/cas-$ns-$NAME-provisioning-step.yaml"
+  if [[ -d $NAME ]] ; then
+      warning "Directory $NAME already exists - we cannot provision for same NAME again. Delete $NAME or use a different name."
+      exit 1
+  fi
 
-verbose "Creating manifest '$manifest_provsioning' for CAS provsioning"
+  mkdir -p "$TARGET_DIR/owner-config"
+  mkdir -p "$TARGET_DIR/identity"
 
-cat > "$manifest_provsioning" <<EOF
+  export manifest_provsioning="$TARGET_DIR/owner-config/cas-$ns-$NAME-provisioning-step.yaml"
+
+  verbose "Creating manifest '$manifest_provsioning' for CAS provsioning"
+
+  cat > "$manifest_provsioning" <<EOF
 apiVersion: services.scone.cloud/v1beta1
 kind: CAS
 metadata:
@@ -245,44 +255,67 @@ spec:
     enabled: true
     persistence:
       enabled: true
+  podAnnotations:
+    scone-operator/inject-pull-secret:  "true"
+    
 EOF
 
-verbose "Creating/Appling CAS CR for Provisioning"
+  verbose "Creating/Appling CAS CR for Provisioning"
 
-kubectl apply -f "$manifest_provsioning"
+  kubectl apply -f "$manifest_provsioning"
 
-until kubectl get pods "$NAME-0" --namespace "$ns" 2> /dev/null | grep "Running"
+else
+  verbose "CAS $NAME already exists - trying to provision it"
+fi
+
+POD=""
+until [[ $POD != "" ]]
 do
+     verbose "Waiting for CAS $NAME in Namespace $ns to start"
      sleep 5
-     echo "Waiting for CAS pod $NAME-0 to start"
+     POD=`kubectl get pod --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" -n "$ns" | tail -1 | awk '{ print $1 }'` || echo "..."
 done
 
-until kubectl logs "$NAME-0" --namespace "$ns" | grep "CAS key hash"
+verbose "Found POD '$POD'"
+RETRY=20
+until kubectl logs $POD --namespace "$ns" | grep "CAS key hash"
 do
     sleep 2
-    echo "Waiting for CAS key"
+    verbose "Waiting for CAS key"
+    RETRY=$((RETRY - 1))
+    if [[ $RETRY == 0 ]] ; then
+      error_exit "Cannot retrieve CAS_KEY from log of CAS $NAME. Bailing."
+    fi
 done
 
-export CAS_KEY_HASH=$(kubectl logs "$NAME-0"  --namespace "$ns" | grep "CAS key hash" | awk '{ print $7 } ')
-export CAS_PROVISIONING_TOKEN=$(kubectl logs "$NAME-0"  --namespace "$ns" | grep "CAS provisioning token" | awk ' { print $7 } ')
+export CAS_KEY_HASH=$(kubectl logs "$POD"  --namespace "$ns" | grep "CAS key hash" | awk '{ print $7 } ')
+export CAS_PROVISIONING_TOKEN=$(kubectl logs "$POD"  --namespace "$ns" | grep "CAS provisioning token" | awk ' { print $7 } ')
 
 echo CAS_PROVISIONING_TOKEN=$CAS_PROVISIONING_TOKEN
 echo CAS_KEY_HASH=$CAS_KEY_HASH
 
-verbose "determining the CAS address"
-export SCONE_CAS_ADDR=$(kubectl get svc --namespace "$ns" "$NAME" --template "{{ .spec.clusterIP }}")
+if [[ "$CAS_PROVISIONING_TOKEN" == "" ]] ; then
+  error_exit "Cannot determine the provisioning token of CAS $NAME. Bailing."
+fi
+if [[ "$CAS_KEY_HASH" == "" ]] ; then
+  error_exit "Cannot determine the CAS_KEY of CAS $NAME. Bailing."
+fi
 
-verbose " CAS address = $SCONE_CAS_ADDR"
+verbose "determining the CAS address"
+SVCNAME=`kubectl get svc --namespace "$ns" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+export SCONE_CAS_ADDR=$(kubectl get svc --namespace "$ns" "$SVCNAME" --template "{{ .spec.clusterIP }}")
+
+verbose " CAS address = $SCONE_CAS_ADDR (SVC name = $SVCNAME)"
 
 if [[ "$SCONE_CAS_ADDR" == "" ]] ; then
-   error_exit "Failed to determine IP address of service $NAME in namespace $ns"
+   error_exit "Failed to determine IP address of service $POD in namespace $ns"
 fi
 
 CONFIG_FILE="$TARGET_DIR/owner-config/config.toml"
 cat > "$CONFIG_FILE" <<EOF
 [api_identity]
-common_name = "$SVC_DNS_NAME"
-alt_names = ["$NAME",  "$NAME.$ns.svc.cluster.local", "$NAME.default", "localhost", "$SCONE_CAS_ADDR"]
+common_name = "$SVCNAME"
+alt_names = ["$POD",  "$POD.$ns.svc.cluster.local", "$POD.default",  "$SVCNAME.$ns.svc.cluster.local", "$SVCNAME.default", "localhost", "$SCONE_CAS_ADDR"]
 
 [dcap]
 subscription_key = "$DCAP_KEY"
@@ -293,9 +326,10 @@ sink = "file"
 EOF
 
 sleep 5
-kubectl port-forward service/$NAME 8081:8081 --address='0.0.0.0'  --namespace "$ns" &
+kubectl port-forward service/$SVCNAME 8081:8081 --namespace "$ns" &
 SERVICE_PID=$!
 sleep 5
+kill -0 $SERVICE_PID &>/dev/null || error_exit "It looks like that either port 8081 is not available on your local machine or the service $SVCNAME is not running. Bailing!"
 
 docker run -it --rm \
     --network=host \
@@ -315,9 +349,9 @@ docker run -it --rm \
     with-attestation \
     --accept-group-out-of-date \
 
-sed 's/^/          /' "$TARGET_DIR/identity/config.json" >  "$TARGET_DIR/identity/owner_id.json"
-export OWNER_IDENTITY=$(sed "s/host.docker.internal/$SVC_DNS_NAME/" "$TARGET_DIR/identity/owner_id.json")
-
+sed 's/^/          /' "$TARGET_DIR/identity/config.json" >  "$TARGET_DIR/identity/owner_id_${SVCNAME}_$ns.json"
+export OWNER_IDENTITY=$(sed "s/host.docker.internal/$SVCNAME.$ns/" "$TARGET_DIR/identity/owner_id_${SVCNAME}_$ns.json")
+echo "$OWNER_IDENTITY" > "$TARGET_DIR/identity/owner_id_${SVCNAME}_$ns.json"
 
 BACKUP_POLICY="$TARGET_DIR/identity/backup-controller-session-$POLICY_NAME.yaml"
 cat > "$BACKUP_POLICY" <<EOF
@@ -405,14 +439,17 @@ spec:
     enabled: true
     persistence:
       enabled: true
-# todo:
-#  networkPolicy:
-#    enabled: true
+  networkPolicy:
+    enabled: true
 EOF
 
 verbose "Creating/Appling CAS CR for Production"
 
 kubectl apply -f "$cas_manifest"
+
+verbose "The manifest of CAS instance $NAME is stored in $ cas_manifest"
+verbose "  - You can modify the manifest and apply the canges with 'kubectl apply -f \"$cas_manifest\""
+verbose "The owner identity of is stored in directory \"$TARGET_DIR/identity\""
 
 kill $SERVICE_PID
 
