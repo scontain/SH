@@ -57,6 +57,8 @@ export DEFAULT_NAMESPACE="default" # Default Kubernetes namespace to use
 export export DEFAULT_DCAP_KEY="aecd5ebb682346028d60c36131eb2d92"  # Default DCAP API Key to used
 export OWNER_FILE=""  # Default owner config file
 
+IMAGE_REPO="registry.scontain.com/scone.cloud"
+
 SERVICE_PID=0
 help_flag="--help"
 ns_flag="--namespace"
@@ -71,13 +73,23 @@ debug_flag="--debug"
 debug_short_flag="-d"
 debug=""
 target_flag="--target"
+file_short_flag="-f"
+file_flag="--filename"
 
 ns="$DEFAULT_NAMESPACE"
-repo="$APP_IMAGE_REPO"
+repo="$IMAGE_REPO"
 DCAP_KEY="$DEFAULT_DCAP_KEY"  # Default DCAP API Key to used
 TARGET_DIR="$HOME/.cas" # Default target directory
 SVC=""
 NAME=""
+
+
+if [[ "$DEFAULT_MANIFEST" == "" ]] ; then
+    DEFAULT_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/cas.yaml"
+else
+    warning "Using external DEFAULT_MANIFEST=$DEFAULT_MANIFEST"
+fi
+
 
 usage ()
 {
@@ -110,10 +122,18 @@ usage ()
   echo "                  Enable verbose output"
   echo "    $debug_flag | debug_short_flag"
   echo "                  Create debug image instead of a production image"
+  echo "    $file_flag | file_short_flag"
+  echo "                  file or url	that contains the manifest to apply (default is \$\"DEFAULT_MANIFEST\")"
   echo "    $help_flag"
   echo "                  Output this usage information and exit."
   echo ""
+  echo "Default Configuration: "
+  echo "  - DEFAULT_MANIFEST=\"$DEFAULT_MANIFEST\""
+  echo "  - DEFAULT_NAMESPACE=\"$DEFAULT_NAMESPACE\""
+  echo "  - DEFAULT_DCAP_KEY=\"$DEFAULT_DCAP_KEY\""
+  echo "  - TARGET_DIR=\"$TARGET_DIR\""
 }
+
 
 ##### Parsing arguments
 
@@ -235,6 +255,9 @@ if [[ $EXISTS == 0 ]] ; then
   export manifest_provsioning="$TARGET_DIR/owner-config/cas-$ns-$NAME-provisioning-step.yaml"
 
   verbose "Creating manifest '$manifest_provsioning' for CAS provsioning"
+
+# todo: USE default external  manifest -> which can use $NAME and $NAMESPACE or fixed names
+# provide ENV and flag to overwrite
 
   cat > "$manifest_provsioning" <<EOF
 apiVersion: services.scone.cloud/v1beta1
@@ -402,6 +425,9 @@ kubectl get cas $NAME  --namespace "$ns"
 export cas_manifest="$TARGET_DIR/owner-config/cas-$ns-$NAME-manifest.yaml"
 
 verbose "Creating manifest '$cas_manifest' for CAS provsioning"
+
+# todo: USE default external  manifest -> which can use $NAME and $NAMESPACE or fixed names
+# provide default ENV and flag to overwrite
 
 cat > "$cas_manifest" <<EOF
 apiVersion: services.scone.cloud/v1beta1

@@ -57,7 +57,7 @@ trap 'if [ $? -ne 0 ]; then echo -e "${RED}\"${last_command}\" command failed - 
 CONFIG_FILE="operator_controller_config"
 
 # NOTE: verbose will only show up if you execute with "V=1 ./operator_controller" 
-source "$CONFIG_FILE" || verbose "Note: could not load config file \"$CONFIG_FILE\" - Ignoring."
+source "$CONFIG_FILE" 2>/dev/null || verbose "Note: could not load config file \"$CONFIG_FILE\" - Ignoring."
 
 if [[ "$VERSION" == "" ]] ; then
     VERSION="latest"
@@ -124,6 +124,9 @@ fi
 
 # Functions to fix state
 
+# todo: USE default external namespace manifest -> which has $namespace
+# provide ENV and flag to overwrite
+
 function check_namespace {
     namespace=$1
     verbose "  Checking namespace $namespace"
@@ -132,7 +135,7 @@ function check_namespace {
     then
         warning "  Namespace '$namespace' does not exist."
         if [[ $FIX == 1 ]] ; then
-            ns_manifest=".ns.yaml"
+            namespace_manifest=".ns.yaml"
             verbose " Creating namespace '$namespace' - enabling automatic pull secret injection"
             verbose "   Creating manifest '$namespace_manifest'"
             cat >"$namespace_manifest"  <<EOF
@@ -211,7 +214,8 @@ email_flag="--email"
 deploy_plugin_flag="--plugin"
 plugin_flag="--plugin-path"
 secret_operator_flag="--secret-operator"
-version_flag="--version"
+version_flag="--set_version"
+print_version_flag="--version"
 
 ns="$DEFAULT_NAMESPACE"
 repo="$APP_IMAGE_REPO"
@@ -273,14 +277,17 @@ usage ()
   echo "    $deploy_plugin_flag"
   echo "                  Include the kubectl plugin in the reconciliation and updates."
   echo "    $plugin_flag PATH"
-  echo "                  Path where we should write the kubectl plugin binary. The path must be writeable. Default value: \"$PLUGINBIN\""
+  echo "                  Path where we should write the kubectl plugin binary. The path must be writeable."
+  echo "                  Default value: \"$PLUGINBIN\""
+  echo "                  The prefix of the default value is the last path on your shell \$PATH that is writeable. "
+  echo "                  If none is writeable and you set $deploy_plugin_flag, you must specify $plugin_flag PATH."
   echo "    $secret_operator_flag"
   echo "                  Check/Reconcile/Update the Secret Operator (used to inject Kubernetes Secrets into Kubernetes namespaces)"
   echo "    $verbose_short_flag | $verbose_flag"
   echo "                  Enable verbose output"
   echo "    $debug_flag | debug_short_flag"
   echo "                  Create debug image instead of a production image"
-  echo "    $version_flag"
+  echo "    $version_flag VERSION"
   echo "                  Set the version of the helm chart"
   echo "    $help_flag"
   echo "                  Output this usage information and exit."
@@ -296,7 +303,7 @@ usage ()
   echo "  - IMPS_HELM_CHART=$IMPS_HELM_CHART"
   echo "  - IMPS_HELM_REPO=$IMPS_HELM_REPO"
   echo "  - VERSION=$VERSION"
-  echo "You can overwrite the defaults by setting these environment variables before executing this script."
+  echo "You can overwrite the defaults by exporting these environment variables before executing this script."
 }
 
 ##### Parsing arguments
@@ -390,6 +397,10 @@ while [[ "$#" -gt 0 ]]; do
     ${secret_operator_flag})
       SECRET_OPERATOR=1
       shift # past argument
+      ;;
+    $print_version_flag)
+      echo "$VERSION"
+      exit 0
       ;;
     $help_flag)
       usage
