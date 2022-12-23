@@ -53,6 +53,54 @@ trap 'last_command=$current_command; current_command=$BASH_COMMAND' DEBUG
 trap 'if [ $? -ne 0 ]; then echo -e "${RED}\"${last_command}\" command failed - exiting.${NC}"; if [ $SERVICE_PID != 0 ] ; then kill $SERVICE_PID ; fi ; fi' EXIT
 
 
+# todo: do a precheck to ensure that all directories exist - might need sudo to create
+
+
+function check_prerequisites() {
+    exit_msg=""
+    verbose "Checking that we have access to kubectl"
+    if ! command -v kubectl &> /dev/null
+    then
+        exit_msg="Command 'kubectl' not found!"
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install 'kubectl'- see https://kubernetes.io/docs/tasks/tools/${NC}"
+    fi
+
+    verbose "Checking that we have access to helm"
+    if ! command -v helm &> /dev/null
+    then
+        exit_msg="Command 'helm' not found!"
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install  'helm' - see https://helm.sh/docs/intro/install/${NC}"
+    fi
+
+    exit_msg=""
+    verbose "Checking that we have access to jq"
+    if ! command -v jq &> /dev/null
+    then
+        exit_msg="Command 'jq' not found!"
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install 'jq'- see https://stedolan.github.io/jq/manual/${NC}"
+    fi
+
+    verbose "Checking that you have access to a Kubernetes cluster."
+    if ! kubectl get pods &> /dev/null
+    then
+        echo -e "${RED}It seems that you do not have access to a Kubernetes cluster!${NC}"
+        echo -e "- ${ORANGE}Please ensure that you have access to a Kubernetes cluster${NC}"
+        exit_msg="No access to Kubernetes cluster!"
+    fi
+    if [[ "$exit_msg" != "" ]] ; then
+        error_exit "$exit_msg"
+    fi
+
+    verbose "Checking that required directories exist."
+    mkdir -p "$TARGET_DIR/owner-config" || error_exit "Failed to create directory '$TARGET_DIR/owner-config' - please create manually - this might require sudo"
+    mkdir -p "$TARGET_DIR/identity" || error_exit "Failed to create directory '$TARGET_DIR/identity' - please create manually - this might require sudo"
+}
+
+
+
 export DEFAULT_NAMESPACE="default" # Default Kubernetes namespace to use
 export export DEFAULT_DCAP_KEY="aecd5ebb682346028d60c36131eb2d92"  # Default DCAP API Key to used
 export OWNER_FILE=""  # Default owner config file
@@ -76,7 +124,7 @@ target_flag="--target"
 file_short_flag="-f"
 file_flag="--filename"
 
-ns="$DEFAULT_NAMESPACE"
+NAMESPACE="$DEFAULT_NAMESPACE"
 repo="$IMAGE_REPO"
 DCAP_KEY="$DEFAULT_DCAP_KEY"  # Default DCAP API Key to used
 TARGET_DIR="$HOME/.cas" # Default target directory
@@ -140,10 +188,10 @@ usage ()
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     ${ns_flag} | ${ns_short_flag})
-      ns="$2"
-      if [ ! -n "${ns}" ]; then
+      NAMESPACE="$2"
+      if [ ! -n "${NAMESPACE}" ]; then
         usage
-        error_exit "Error: The namespace '$ns' is invalid."
+        error_exit "Error: The namespace '$NAMESPACE' is invalid."
       fi
       shift # past argument
       shift || true # past value
@@ -211,13 +259,13 @@ if [[ "$NAME" == "" ]] ; then
   NAME="$SVC"
 fi
 
-if ! kubectl get namespace "$ns" > /dev/null 2>/dev/null
+if ! kubectl get namespace "$NAMESPACE" > /dev/null 2>/dev/null
 then
-  error_exit "Namespace '$ns' does not exist."
+  error_exit "Namespace '$NAMESPACE' does not exist."
 fi
 
 if [ "$SVC" == "cas" ] ; then
-   verbose "Provisioning service 'cas': NAME = '$NAME' in namespace '$ns' using DCAP-API Key '$DCAP_KEY'" 
+   verbose "Provisioning service 'cas': NAME = '$NAME' in namespace '$NAMESPACE' using DCAP-API Key '$DCAP_KEY'" 
 
   if [[ "$DCAP_KEY" == "$DEFAULT_DCAP_KEY" ]] ; then
     warning  "No DCAP API Key specified! Using default - this is not recommended for production!"
@@ -228,17 +276,32 @@ export SCONE_CLI_MRENCLAVE="$(docker run -t --rm --entrypoint scone -e SCONE_HAS
 export POLICY_NAME="$NAME-backup-controller-$RANDOM$RANDOM"
 export BACKUPCONTROLLER="$NAME-backup-controller" 
 
+check_prerequisites
 
 verbose "checking if CAS already exists"
 
-EXISTS=1 kubectl get cas "$NAME" --namespace "$ns" &>/dev/null || EXISTS=0
+# todo:
+# EXISTS=1 kubectl get cas "$NAME" --namespace "$NAMESPACE" &>/dev/null || EXISTS=0
+
+IMAGE=""
+EXISTS=1  JSON=$(kubectl get cas "$NAME" --namespace "$NAMESPACE" -o json 2>/dev/null) || EXISTS=0
+
+if [[ $EXISTS == 1 ]] ; then
+  IMAGE=$(echo $JSON | jq '(.spec.image)' | tr -d '"' | jq -R '. | sub( "(?<image>[^':']*):(?<tag>.*)" ; "\(.image)")' | tr -d '"' )
+  TAG=$(echo $JSON | jq '(.spec.image)' | tr -d '"' | jq -R '. |   sub( "(?<image>[^':']+)([':']+)(?<tag>.*)" ; "\(.image)")' | tr -d '"' )
+  if [[ "$IMAGE" == "$TAG" ]] ; then
+    TAG="latest"
+    verbose "CAS Image '$IMAGE' has no tag specified - using '$TAG'"
+  else
+    verbose "CAS Image '$IMAGE' has tag '$TAG'"
+  fi 
+fi
 
 if [[ $EXISTS == 0 ]] ; then
-
   verbose "CAS $NAME does not exists - creating it"
 
-  export SVC_DNS_NAME="$NAME.$ns.svc.cluster.local"
-  if kubectl get pvc "database-$NAME-0"  --namespace "$ns" 2> /dev/null 1> /dev/null ; then
+  export SVC_DNS_NAME="$NAME.$NAMESPACE.svc.cluster.local"
+  if kubectl get pvc "database-$NAME-0"  --namespace "$NAMESPACE" 2> /dev/null 1> /dev/null ; then
     warning "Volume $database-$NAME-0 already exists - provision of CAS for existing volume not supported: We do not want to overwrite existing database"
     exit 1
   fi
@@ -249,22 +312,20 @@ if [[ $EXISTS == 0 ]] ; then
       exit 1
   fi
 
-  mkdir -p "$TARGET_DIR/owner-config"
-  mkdir -p "$TARGET_DIR/identity"
-
-  export manifest_provsioning="$TARGET_DIR/owner-config/cas-$ns-$NAME-provisioning-step.yaml"
+  export manifest_provsioning="$TARGET_DIR/owner-config/cas-$NAMESPACE-$NAME-$VERSION-provisioning-step.yaml"
 
   verbose "Creating manifest '$manifest_provsioning' for CAS provsioning"
 
 # todo: USE default external  manifest -> which can use $NAME and $NAMESPACE or fixed names
 # provide ENV and flag to overwrite
+# $MANIFESTS$VERSION/cas.yaml
 
   cat > "$manifest_provsioning" <<EOF
 apiVersion: services.scone.cloud/v1beta1
 kind: CAS
 metadata:
   name: $NAME
-  namespace: $ns
+  namespace: $NAMESPACE
 spec:
   image: registry.scontain.com/scone.cloud/cas
   imagePullSecrets:
@@ -280,7 +341,7 @@ spec:
       enabled: true
   podAnnotations:
     scone-operator/inject-pull-secret:  "true"
-    
+
 EOF
 
   verbose "Creating/Appling CAS CR for Provisioning"
@@ -294,14 +355,14 @@ fi
 POD=""
 until [[ $POD != "" ]]
 do
-     verbose "Waiting for CAS $NAME in Namespace $ns to start"
+     verbose "Waiting for CAS $NAME in Namespace $NAMESPACE to start"
      sleep 5
-     POD=`kubectl get pod --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" -n "$ns" | tail -1 | awk '{ print $1 }'` || echo "..."
+     POD=`kubectl get pod --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" -n "$NAMESPACE" | tail -1 | awk '{ print $1 }'` || echo "..."
 done
 
 verbose "Found POD '$POD'"
 RETRY=20
-until kubectl logs $POD --namespace "$ns" | grep "CAS key hash"
+until kubectl logs $POD --namespace "$NAMESPACE" | grep "CAS key hash"
 do
     sleep 2
     verbose "Waiting for CAS key"
@@ -311,8 +372,8 @@ do
     fi
 done
 
-export CAS_KEY_HASH=$(kubectl logs "$POD"  --namespace "$ns" | grep "CAS key hash" | awk '{ print $7 } ')
-export CAS_PROVISIONING_TOKEN=$(kubectl logs "$POD"  --namespace "$ns" | grep "CAS provisioning token" | awk ' { print $7 } ')
+export CAS_KEY_HASH=$(kubectl logs "$POD"  --namespace "$NAMESPACE" | grep "CAS key hash" | awk '{ print $7 } ')
+export CAS_PROVISIONING_TOKEN=$(kubectl logs "$POD"  --namespace "$NAMESPACE" | grep "CAS provisioning token" | awk ' { print $7 } ')
 
 echo CAS_PROVISIONING_TOKEN=$CAS_PROVISIONING_TOKEN
 echo CAS_KEY_HASH=$CAS_KEY_HASH
@@ -325,20 +386,20 @@ if [[ "$CAS_KEY_HASH" == "" ]] ; then
 fi
 
 verbose "determining the CAS address"
-SVCNAME=`kubectl get svc --namespace "$ns" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
-export SCONE_CAS_ADDR=$(kubectl get svc --namespace "$ns" "$SVCNAME" --template "{{ .spec.clusterIP }}")
+SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+export SCONE_CAS_ADDR=$(kubectl get svc --namespace "$NAMESPACE" "$SVCNAME" --template "{{ .spec.clusterIP }}")
 
 verbose " CAS address = $SCONE_CAS_ADDR (SVC name = $SVCNAME)"
 
 if [[ "$SCONE_CAS_ADDR" == "" ]] ; then
-   error_exit "Failed to determine IP address of service $POD in namespace $ns"
+   error_exit "Failed to determine IP address of service $POD in namespace $NAMESPACE"
 fi
 
 CONFIG_FILE="$TARGET_DIR/owner-config/config.toml"
 cat > "$CONFIG_FILE" <<EOF
 [api_identity]
 common_name = "$SVCNAME"
-alt_names = ["$POD",  "$POD.$ns.svc.cluster.local", "$POD.default",  "$SVCNAME.$ns.svc.cluster.local", "$SVCNAME.default", "localhost", "$SCONE_CAS_ADDR"]
+alt_names = ["$POD",  "$POD.$NAMESPACE.svc.cluster.local", "$POD.default",  "$SVCNAME.$NAMESPACE.svc.cluster.local", "$SVCNAME.default", "localhost", "$SCONE_CAS_ADDR"]
 
 [dcap]
 subscription_key = "$DCAP_KEY"
@@ -349,7 +410,7 @@ sink = "file"
 EOF
 
 sleep 5
-kubectl port-forward service/$SVCNAME 8081:8081 --namespace "$ns" &
+kubectl port-forward service/$SVCNAME 8081:8081 --namespace "$NAMESPACE" --address=0.0.0.0 &
 SERVICE_PID=$!
 sleep 5
 kill -0 $SERVICE_PID &>/dev/null || error_exit "It looks like that either port 8081 is not available on your local machine or the service $SVCNAME is not running. Bailing!"
@@ -372,9 +433,9 @@ docker run -it --rm \
     with-attestation \
     --accept-group-out-of-date \
 
-sed 's/^/          /' "$TARGET_DIR/identity/config.json" >  "$TARGET_DIR/identity/owner_id_${SVCNAME}_$ns.json"
-export OWNER_IDENTITY=$(sed "s/host.docker.internal/$SVCNAME.$ns/" "$TARGET_DIR/identity/owner_id_${SVCNAME}_$ns.json")
-echo "$OWNER_IDENTITY" > "$TARGET_DIR/identity/owner_id_${SVCNAME}_$ns.json"
+sed 's/^/          /' "$TARGET_DIR/identity/config.json" >  "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json"
+export OWNER_IDENTITY=$(sed "s/host.docker.internal/$SVCNAME.$NAMESPACE/" "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json")
+echo "$OWNER_IDENTITY" > "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json"
 
 BACKUP_POLICY="$TARGET_DIR/identity/backup-controller-session-$POLICY_NAME.yaml"
 cat > "$BACKUP_POLICY" <<EOF
@@ -420,9 +481,9 @@ docker run -it --rm \
 
 # todo: use encrypted policy and upload encrypted policy
 
-kubectl get cas $NAME  --namespace "$ns"
+kubectl get cas $NAME  --namespace "$NAMESPACE"
 
-export cas_manifest="$TARGET_DIR/owner-config/cas-$ns-$NAME-manifest.yaml"
+export cas_manifest="$TARGET_DIR/owner-config/cas-$NAMESPACE-$NAME-manifest.yaml"
 
 verbose "Creating manifest '$cas_manifest' for CAS provsioning"
 
@@ -434,7 +495,7 @@ apiVersion: services.scone.cloud/v1beta1
 kind: CAS
 metadata:
   name: $NAME
-  namespace: $ns
+  namespace: $NAMESPACE
 spec:
   image: registry.scontain.com/scone.cloud/cas
   imagePullSecrets:

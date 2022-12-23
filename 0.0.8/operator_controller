@@ -24,6 +24,22 @@ WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF
 Copyright (C) 2022 scontain.com
 '
 
+: '
+The `operator_controller` script deploys, reconciles, or updates the SCONE operator
+
+One should always use the latest version of this script. Via environment variables, one can customize the
+script to install from different docker and git repos. The environment variables can be defined before calling
+this script or by providing a config file $CONFIG_FILE (default is "operator_controller_config").
+
+ - VERSION: it installs the "latest" version of the operator unless you define environment variable VERSION
+ - REGISTRY: by default it uses registry "registry.scontain.com" to pull the operator unless you define env variable REGISTRY
+ - MANIFESTS: by default we pull from  "https://raw.githubusercontent.com/scontain/operator-samples/main/$VERSION" - the manifests are VERSIONed
+ - SCRIPTS: by default we pull from  "https://raw.githubusercontent.com/scontain/SH/main/$VERSION" - the scripts are VERSIONed
+ - CHART: by default we pull the chart from  "https://raw.githubusercontent.com/scontain/operator/main/" 
+    - the charts are VERSIONed: scone-operator-$VERSION.tgz
+    - the images used in the CHART are versioned but we overwrite the image with $REGISTRY/scone.cloud/k8soperators:$VERSION
+'
+
 set -e
 
 export RED='\e[31m'
@@ -52,12 +68,24 @@ function error_exit() {
 trap 'last_command=$current_command; current_command=$BASH_COMMAND' DEBUG
 trap 'if [ $? -ne 0 ]; then echo -e "${RED}\"${last_command}\" command failed - exiting.${NC}" ; fi' EXIT
 
-# CONFIG SECTION - can only change via environment variables (and not yet via flags)
+# CONFIG SECTION - some configuration options only be changed via environment variables (and not yet via command line flags)
 
-CONFIG_FILE="operator_controller_config"
+if [[ "$CONFIG_FILE" == "" ]] ; then
+    CONFIG_FILE="operator_controller_config"
+else
+    CONFIG_FILE "Using external CONFIG_FILE=$CONFIG_FILE"
+fi
 
 # NOTE: verbose will only show up if you execute with "V=1 ./operator_controller" 
 source "$CONFIG_FILE" 2>/dev/null || verbose "Note: could not load config file \"$CONFIG_FILE\" - Ignoring."
+
+#
+# VERSION: all components 
+#
+#  latest   # default: install the latest version - right now this would be 5.8.0
+#  5.8.0    # specific: version of the operator to install
+#
+
 
 if [[ "$VERSION" == "" ]] ; then
     VERSION="latest"
@@ -78,40 +106,18 @@ else
     warning "Using external DEFAULT_NAMESPACE=$DEFAULT_NAMESPACE"
 fi
 
-if [[ "$HELM_CHART" == "" ]] ; then
-    HELM_CHART="https://raw.githubusercontent.com/scontain/operator/main/$VERSION.tgz"
-else
-    warning "Using external HELM_CHART=$HELM_CHART"
-fi
-
-if [[ "$LAS_MANIFEST" == "" ]] ; then
-    LAS_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/base_v1beta1_las.yaml"
-else
-    warning "Using external LAS_MANIFEST=$LAS_MANIFEST"
-fi
-
-if [[ "$SGXPLUGIN_MANIFEST" == "" ]] ; then
-    SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/base_v1beta1_sgxplugin.yaml"
-else
-    warning "Using external SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
-fi
-
 if [[ "$REGISTRY" == "" ]] ; then
     REGISTRY="registry.scontain.com"
 else
     warning "Using external REGISTRY=$REGISTRY"
 fi
 
+# definitions related to secret operator (not recommended for production)
+
 if [[ "$IMPS_HELM_CHART" == "" ]] ; then
     IMPS_HELM_CHART="banzaicloud-stable/imagepullsecrets"
 else
     warning "Using external IMPS_HELM_CHART=$IMPS_HELM_CHART"
-fi
-
-if [[ "$KUBECTLPLUGIN" == "" ]] ; then
-    KUBECTLPLUGIN="https://raw.githubusercontent.com/scontain/SH/master/kubectl-provision"
-else
-    warning "Using external KUBECTLPLUGIN=$KUBECTLPLUGIN"
 fi
 
 if [[ "$IMPS_HELM_REPO" == "" ]] ; then
@@ -122,27 +128,66 @@ fi
 
 
 
+
+function check_prerequisites() {
+    exit_msg=""
+    verbose "Checking that we have access to kubectl"
+    if ! command -v kubectl &> /dev/null
+    then
+        exit_msg="Command 'kubectl' not found!"
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install 'kubectl'- see https://kubernetes.io/docs/tasks/tools/${NC}"
+    fi
+
+    verbose "Checking that we have access to helm"
+    if ! command -v helm &> /dev/null
+    then
+        exit_msg="Command 'helm' not found!"
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install  'helm' - see https://helm.sh/docs/intro/install/${NC}"
+    fi
+
+    exit_msg=""
+    verbose "Checking that we have access to jq"
+    if ! command -v jq &> /dev/null
+    then
+        exit_msg="Command 'jq' not found!"
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install 'jq'- see https://stedolan.github.io/jq/manual/${NC}"
+    fi
+
+    verbose "Checking that you have access to a Kubernetes cluster."
+    if ! kubectl get pods &> /dev/null
+    then
+        echo -e "${RED}It seems that you do not have access to a Kubernetes cluster!${NC}"
+        echo -e "- ${ORANGE}Please ensure that you have access to a Kubernetes cluster${NC}"
+        exit_msg="No access to Kubernetes cluster!"
+    fi
+    if [[ "$exit_msg" != "" ]] ; then
+        error_exit "$exit_msg"
+    fi
+}
+
 # Functions to fix state
 
-# todo: USE default external namespace manifest -> which has $namespace
-# provide ENV and flag to overwrite
+# USE default external namespace manifest -> which has $namespace
 
 function check_namespace {
-    namespace=$1
-    verbose "  Checking namespace $namespace"
+    NAMESPACE=$1
+    verbose "  Checking namespace $NAMESPACE"
 
-    if ! kubectl get namespace "$namespace" > /dev/null 2>/dev/null
+    if ! kubectl get namespace "$NAMESPACE" > /dev/null 2>/dev/null
     then
-        warning "  Namespace '$namespace' does not exist."
+        warning "  Namespace '$NAMESPACE' does not exist."
         if [[ $FIX == 1 ]] ; then
             namespace_manifest=".ns.yaml"
-            verbose " Creating namespace '$namespace' - enabling automatic pull secret injection"
+            verbose " Creating namespace '$NAMESPACE' - enabling automatic pull secret injection"
             verbose "   Creating manifest '$namespace_manifest'"
             cat >"$namespace_manifest"  <<EOF
 apiVersion: v1
 kind: Namespace
 metadata:
-name: $namespace
+name: $NAMESPACE
 labels:
     name: scone-system
 annotations:
@@ -153,7 +198,7 @@ EOF
             kubectl apply -f "$namespace_manifest"
         fi
     else
-        verbose "  Namespace '$namespace' already exist - no updating/fixing"
+        verbose "  Namespace '$NAMESPACE' already exist - no updating/fixing"
     fi
 }
 
@@ -188,7 +233,33 @@ function check_secret {
     fi
 }
 
+function set_urls() {
 
+    if [[ "$HELM_CHART" == "" ]] ; then
+        HELM_CHART="https://raw.githubusercontent.com/scontain/operator/main/scone-operator-$VERSION.tgz"
+    else
+        warning "Using external HELM_CHART=$HELM_CHART"
+    fi
+
+    if [[ "$LAS_MANIFEST" == "" ]] ; then
+        LAS_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/$VERSION/las.yaml"
+    else
+        warning "Using external LAS_MANIFEST=$LAS_MANIFEST"
+    fi
+
+    if [[ "$SGXPLUGIN_MANIFEST" == "" ]] ; then
+        SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/$VERSION/sgxplugin.yaml"
+    else
+        warning "Using external SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
+    fi
+
+    if [[ "$KUBECTLPLUGIN" == "" ]] ; then
+        KUBECTLPLUGIN="https://raw.githubusercontent.com/scontain/SH/master/$VERSION/kubectl-provision"
+    else
+        warning "Using external KUBECTLPLUGIN=$KUBECTLPLUGIN"
+    fi
+
+}
 #
 help_flag="--help"
 ns_flag="--namespace"
@@ -214,10 +285,10 @@ email_flag="--email"
 deploy_plugin_flag="--plugin"
 plugin_flag="--plugin-path"
 secret_operator_flag="--secret-operator"
-version_flag="--set_version"
+version_flag="--set-version"
 print_version_flag="--version"
 
-ns="$DEFAULT_NAMESPACE"
+NAMESPACE="$DEFAULT_NAMESPACE"
 repo="$APP_IMAGE_REPO"
 create_ns=""
 
@@ -311,10 +382,10 @@ usage ()
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     ${ns_flag} | ${ns_short_flag})
-      ns="$2"
-      if [ ! -n "${ns}" ]; then
+      NAMESPACE="$2"
+      if [ ! -n "${NAMESPACE}" ]; then
         usage
-        error_exit "Error: The namespace '$ns' is invalid."
+        error_exit "Error: The namespace '$NAMESPACE' is invalid."
       fi
       shift # past argument
       shift || true # past value
@@ -357,7 +428,6 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     ${version_flag})
       VERSION="$2"
-      HELM_CHART="https://raw.githubusercontent.com/scontain/operator/main/$VERSION.tgz"
       if [ ! -n "${VERSION}" ]; then
         usage
         error_exit "Error: Please specify a valid VERSION ('$VERSION' is invalid)."
@@ -403,6 +473,7 @@ while [[ "$#" -gt 0 ]]; do
       exit 0
       ;;
     $help_flag)
+      set_urls
       usage
       exit 0
       ;;
@@ -413,11 +484,16 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 
+set_urls
+
+
 if [[ $REGISTRY_USERNAME != "" || $REGISTRY_ACCESS_TOKEN != "" ||  $REGISTRY_EMAIL != "" ]] ; then
     if [[ $REGISTRY_USERNAME == "" || $REGISTRY_ACCESS_TOKEN == "" ||  $REGISTRY_EMAIL == "" ]] ; then
         error_exit "You need to specify flags $user_flag, $token_flag, $token_flag"
     fi
 fi
+
+check_prerequisites
 
 if [[ $UPDATE == 1 ]] ; then
     verbose "Updating / fixing all components"
@@ -446,30 +522,33 @@ do
     fi
 done
 
-verbose "Checking that operator namespace '$ns' exists"
-check_namespace "$ns"
+verbose "Checking that operator namespace '$NAMESPACE' exists"
+check_namespace "$NAMESPACE"
 
 if [[ "$create_ns" != "" ]] ; then
     verbose "Checking that service namespace '$create_ns' exists"
     check_namespace "$create_ns"
 fi
 
-check_secret "scone-operator-pull" "$ns"
-check_secret "sconeapps" "$ns"
+check_secret "scone-operator-pull" "$NAMESPACE"
+check_secret "sconeapps" "$NAMESPACE"
 
 verbose "Checking SCONE Operator"
-SO=`helm list -A | grep scone-operator | wc -l | sed 's/^[[:space:]]*//g'`
+# SO=`helm list -A | grep scone-operator | wc -l | sed 's/^[[:space:]]*//g'`
 
-if [[ $UPDATE == 1 && $SO != "0" ]] ; then
+INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.chart | startswith("scone-operator-"))' | jq '(.chart |  ltrimstr("scone-operator-"))' | tr -d '"')
+
+verbose "Installed version of the operator controller is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
+if [[ $UPDATE == 1 && "$INSTALLED_VERSION" != "$VERSION" ]] ; then
     verbose "  Updating the SCONE Operator"
-    helm upgrade scone-operator $HELM_CHART --namespace $ns
+    helm upgrade --install scone-operator $HELM_CHART --namespace $NAMESPACE  --version $VERSION
 fi
 
-if [[ $SO == "0" ]] ; then
-    warning "SCONE operator not installed!"
+if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
+    warning "Desired version of SCONE operator is NOT installed!"
     if [[ $FIX == 1 ]] ; then
         verbose "  Fixing the SCONE Operator"
-        helm install scone-operator $HELM_CHART --namespace $ns
+        helm upgrade --install scone-operator $HELM_CHART --namespace $NAMESPACE --version $VERSION
     fi
 fi
 
@@ -557,7 +636,7 @@ if [[ $SECRET_OPERATOR == 1 ]] ; then
     if [[ $UPDATE == 1 && $SO != "0" ]] ; then
         verbose "  Updating the Secret Operator"
         helm repo add --force-update $IMPS_HELM_REPO
-        helm upgrade scone-imps $IMPS_HELM_CHART --namespace $ns
+        helm upgrade --install scone-imps $IMPS_HELM_CHART --namespace $NAMESPACE
     fi
 
     if [[ $SO == "0" ]] ; then
@@ -565,7 +644,7 @@ if [[ $SECRET_OPERATOR == 1 ]] ; then
         if [[ $FIX == 1 ]] ; then
             verbose "  Fixing the SECRETS Operator"
             helm repo add $IMPS_HELM_REPO
-            helm install scone-imps $IMPS_HELM_CHART --namespace $ns
+            helm install scone-imps $IMPS_HELM_CHART --namespace $NAMESPACE
         fi
     fi
 fi
