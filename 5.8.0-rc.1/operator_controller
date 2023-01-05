@@ -297,6 +297,7 @@ plugin_flag="--plugin-path"
 secret_operator_flag="--secret-operator"
 version_flag="--set-version"
 print_version_flag="--version"
+only_controller_flag="--only-operator"
 
 NAMESPACE="$DEFAULT_NAMESPACE"
 repo="$APP_IMAGE_REPO"
@@ -312,6 +313,7 @@ REGISTRY_ACCESS_TOKEN=""
 REGISTRY_EMAIL=""
 PLUGIN=0
 SECRET_OPERATOR=1
+ONLY_OPERATOR=0
 
 # find directory on path where we are permitted to copy the plugin to
 
@@ -364,6 +366,8 @@ usage ()
   echo "                  If none is writeable and you set $deploy_plugin_flag, you must specify $plugin_flag PATH."
   echo "    $secret_operator_flag"
   echo "                  Check/Reconcile/Update the Secret Operator (used to inject Kubernetes Secrets into Kubernetes namespaces)"
+  echo "    $only_controller_flag"
+  echo "                  Only install the SCONE Operator (but no LAS, SGXPlugin, kubectl plugin)"
   echo "    $verbose_short_flag | $verbose_flag"
   echo "                  Enable verbose output"
   echo "    $debug_flag | debug_short_flag"
@@ -478,11 +482,15 @@ while [[ "$#" -gt 0 ]]; do
       SECRET_OPERATOR=1
       shift # past argument
       ;;
-    $print_version_flag)
+    ${only_controller_flag})
+      ONLY_OPERATOR=1;
+      shift # past argument
+      ;;
+    ${print_version_flag})
       echo "$VERSION"
       exit 0
       ;;
-    $help_flag)
+    ${help_flag})
       set_urls
       usage
       exit 0
@@ -588,8 +596,17 @@ then
     warning "Custom Resource Definition 'encryptedpolicies' does not exist."
 fi
 
-# todo : check for Vault CRD
 
+if ! kubectl describe crd vaults > /dev/null 2>/dev/null
+then
+    warning "Custom Resource Definition 'vaults' does not exist."
+fi
+
+
+if [[ $ONLY_OPERATOR == 1 ]] ; then
+    verbose "Only checking Operator - Done."
+    exit 0
+fi
 
 verbose "Checking SGXPlugin"
 
