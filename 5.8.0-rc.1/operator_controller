@@ -612,7 +612,7 @@ else
         warning "Desired version of SCONE SGXPlugin is NOT installed!"
         if [[ $FIX == 1 ]] ; then
             verbose "  Fixing the SGXPlugin"
-            echo "TODO"
+            warning "Not Yet Implemented (ToDo)"
         fi
     fi
 fi
@@ -635,9 +635,9 @@ verbose "Checking if the kubectl plugin exists"
 Fixit=0
 KVERSION=$(kubectl provision --version 2>/dev/null) || Fixit=2
 
-if [[ $Fixit != 0 || "$VERSION" != "$KVERSION"  ]] ; then
+if [[ $Fixit != 0 || "$VERSION" != "$KVERSION" ]] ; then
     if [[ $Fixit == 2 ]] ; then
-        warning "SCONE kubectl plugin does not exist - must be deployed"
+        warning "SCONE kubectl plugin does not exist - must be deployed ($VERSION != $KVERSION)"
     else
         echo "SCONE kubectl plugin must be updated"
     fi
