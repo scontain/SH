@@ -48,6 +48,10 @@ function error_exit() {
   exit 1
 }
 
+function set_platform_ids {
+  export PLATFORM_IDS=$(kubectl get LAS -A -o json | jq '.items[].status.nodes[].publicKey' | tr -d '"' | sort | uniq | awk '{ print "platforms: [" $1 "]" }')
+}
+
 # print an error message on an error exit
 trap 'last_command=$current_command; current_command=$BASH_COMMAND' DEBUG
 trap 'if [ $? -ne 0 ]; then echo -e "${RED}\"${last_command}\" command failed - exiting.${NC}"; if [ $SERVICE_PID != 0 ] ; then kill $SERVICE_PID ; fi ; fi' EXIT
@@ -102,7 +106,85 @@ function check_prerequisites() {
 
 }
 
+function check_if_provisioned {
 
+  CAS_CLIENT_PORT=8081
+  verbose "CAS SVC name = $NAME)"
+
+  if ! kubectl get cas "$NAME" -n "$NAMESPACE" 2> /dev/null >/dev/null
+  then
+    verbose "No CAS $CAS is running in namespace $NAMESPACE"
+    trap '' EXIT
+    exit 1
+  fi
+ 
+  kubectl port-forward service/$NAME $CAS_CLIENT_PORT:$CAS_CLIENT_PORT --namespace "$NAMESPACE" --address=0.0.0.0 > /dev/null &
+  SERVICE_PID=$!
+  sleep 5
+  kill -0 $SERVICE_PID &>/dev/null || error_exit "It looks like that either port $CAS_CLIENT_PORT is not available on your local machine or the service $SVCNAME is not running. Bailing!"
+
+
+  RESULT=$(docker run -it --rm \
+      --network=host \
+      --add-host=host.docker.internal:host-gateway \
+      -v "$TARGET_DIR"/identity:/identity \
+      -v "$TARGET_DIR"/owner-config:/owner-config \
+      -e SCONE_CLI_CONFIG="/identity/config.json" \
+      -e SCONE_CAS_ADDR="host.docker.internal" \
+      -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
+      -e POLICY_NAME="$POLICY_NAME" \
+      -e SCONE_LOG="ERROR" \
+      $IMAGE_REPO/cas \
+      bash -c 'scone cas attest -G host.docker.internal >/dev/null 2>/dev/null; scone cas set-default host.docker.internal ;  scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "CAS is NOT provisioned" ; else  echo "CAS is provisioned" ; fi ')
+
+  verbose "$RESULT"
+  kill $SERVICE_PID
+
+  if [[ "$RESULT" == "CAS is NOT provisioned" ]] ; then
+    echo "$RESULT" "CAS is provisioned"
+    trap '' EXIT
+    exit 1
+  fi
+}
+
+function print_cas_keys {
+
+  CAS_CLIENT_PORT=8081
+  verbose "CAS SVC name = $NAME"
+
+  if ! kubectl get cas "$NAME" -n "$NAMESPACE" 2> /dev/null >/dev/null
+  then
+    warning "No CAS $CAS is running in namespace $NAMESPACE"
+    trap '' EXIT
+    exit 1
+  fi
+ 
+  kubectl port-forward service/$NAME $CAS_CLIENT_PORT:$CAS_CLIENT_PORT --namespace "$NAMESPACE" --address=0.0.0.0 > /dev/null &
+  SERVICE_PID=$!
+  sleep 5
+  kill -0 $SERVICE_PID &>/dev/null || error_exit "It looks like that either port $CAS_CLIENT_PORT is not available on your local machine or the service $SVCNAME is not running. Bailing!"
+
+
+  docker run -it --rm \
+      --network=host \
+      --add-host=host.docker.internal:host-gateway \
+      -v "$TARGET_DIR"/identity:/identity \
+      -v "$TARGET_DIR"/owner-config:/owner-config \
+      -e SCONE_CLI_CONFIG="/identity/config.json" \
+      -e SCONE_CAS_ADDR="host.docker.internal" \
+      -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
+      -e POLICY_NAME="$POLICY_NAME" \
+      -e SCONE_LOG="ERROR" \
+      $IMAGE_REPO/cas \
+    sh -c "set -e ; scone cas attest -G host.docker.internal > /dev/null 2> /dev/null; scone cas set-default host.docker.internal ; echo -en 'export CAS_KEY=\"' ; scone cas show-identification -c  | tr -d '\n'  ; echo -en '\"\nexport CAS_SOFTWARE_KEY=\"' ; scone cas show-identification -s | tr -d '\n' ; echo -en '\"\nexport CAS_SESSION_ENCRYPTION_KEY=\"'; scone cas show-identification --session-encryption-key  | tr -d '\n' ; echo -en '\"\n' "
+
+  echo "export CAS_URL=\"$NAME.$NAMESPACE\""
+
+  kill $SERVICE_PID
+  trap '' EXIT
+  exit 0
+
+}
 
 if [[ "$DEFAULT_NAMESPACE" == "" ]] ; then
   export DEFAULT_NAMESPACE="default" # Default Kubernetes namespace to use
@@ -162,6 +244,8 @@ version_flag="--set-version"
 no_backup_flag="--no-backup"
 webhook_flag="--webhook"
 print_version_flag="--version"
+is_provisioned_flag="--is-provisioned"
+print_caskeys_flag="--print_caskeys"
 
 DCAP_KEY="$DEFAULT_DCAP_KEY"  # Default DCAP API Key to used
 SVC=""
@@ -170,6 +254,8 @@ NAME=""
 VAULT_NAME=""
 NO_BACKUP=0
 WEBHOOK=""
+is_provisioned=0
+print_caskeys=0
 
 usage ()
 {
@@ -209,6 +295,10 @@ usage ()
   echo "                  Forward entries of the CAS audit log to the given URL"
   echo "    $file_flag | file_short_flag"
   echo "                  file or url	that contains the manifest to apply (default is \$\"DEFAULT_MANIFEST\")"
+  echo "    $is_provisioned_flag"
+  echo "                  Checks if CAS is already provisioned and exists: Exits with an error in case it was not yet provisioned."
+  echo "    $print_caskeys_flag"
+  echo "                  Prints the CAS Key, the CAS Software Key and the CAS encryption key."
   echo "    $version_flag VERSION"
   echo "                  Set the version of CAS"
   echo "    $help_flag"
@@ -299,6 +389,14 @@ while [[ "$#" -gt 0 ]]; do
       echo $K_PROVISION_VERSION
       exit 0
       ;;
+    ${is_provisioned_flag})
+      is_provisioned=1
+      shift # past argument
+      ;;
+    ${print_caskeys_flag})
+      print_caskeys=1
+      shift # past argument
+      ;;
     $help_flag)
       usage
       exit 0
@@ -346,6 +444,20 @@ if [[ "${SVC}" == "vault" ]]; then
     error_exit "The vault CR '$VAULT_NAME' already exists in namespace '$NAMESPACE'. We currently do not support provisioning an existing vault."
   fi
 fi
+
+if [ $is_provisioned == 1 ]
+then
+  check_if_provisioned
+  exit 0
+fi
+
+if [ $print_caskeys == 1 ]
+then
+  print_cas_keys
+  exit 0
+fi
+
+
 
 verbose "Checking if CAS '$NAME' already exists"
 
@@ -522,7 +634,7 @@ SERVICE_PID=$!
 sleep 5
 kill -0 $SERVICE_PID &>/dev/null || error_exit "It looks like that either port $CAS_CLIENT_PORT is not available on your local machine or the service $SVCNAME is not running. Bailing!"
 
-export SCONE_CLI_MRENCLAVE="$(docker run -t --rm --entrypoint scone -e SCONE_HASH=1 registry.scontain.com/scone.cloud/backup-controller cas)"
+export SCONE_CLI_MRENCLAVE="$(docker run -t --rm --entrypoint scone -e SCONE_HASH=1 registry.scontain.com/scone.cloud/backup-controller cas | tr -d '\r')"
 export POLICY_NAME="$NAME-backup-controller-$RANDOM$RANDOM"
 
 docker run -it --rm \
@@ -548,9 +660,10 @@ export OWNER_IDENTITY=$(sed "s/host.docker.internal/$SVCNAME.$NAMESPACE/" "$TARG
 echo "$OWNER_IDENTITY" > "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json"
 
 BACKUP_POLICY="$TARGET_DIR/identity/backup-controller-session-$POLICY_NAME.yaml"
+set_platform_ids
 cat > "$BACKUP_POLICY" <<EOF
 name: $POLICY_NAME
-version: "0.3"
+version: "0.3.10"
 
 security:
   attestation:
@@ -559,8 +672,11 @@ security:
 services:
   - name: register
     image_name: cli
+    # optional: 
+    #$PLATFORM_IDS
     attestation:
-      - mrenclave: [$SCONE_CLI_MRENCLAVE]
+      mrenclave:
+        - $SCONE_CLI_MRENCLAVE
     command: "scone cas register-backup @@3"
     environment:
       SCONE_MODE: hw
@@ -577,6 +693,22 @@ images:
 $OWNER_IDENTITY
 EOF
 
+PROVISIONED_POLICY="$TARGET_DIR/identity/provisioned.yaml"
+cat > "$PROVISIONED_POLICY" <<EOF
+name: provisioned
+version: "0.3.10"
+predecessor:
+
+access_policy:
+  read:
+    - ANY
+  update:
+    - CREATOR
+  create_sessions:
+    - CREATOR
+EOF
+
+
 docker run -it --rm \
     --network=host \
     --add-host=host.docker.internal:host-gateway \
@@ -587,7 +719,7 @@ docker run -it --rm \
     -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
     -e POLICY_NAME="$POLICY_NAME" \
     $IMAGE_REPO/cas \
-    sh -c "scone cas attest -G host.docker.internal; scone cas set-default host.docker.internal ; scone session create /identity/backup-controller-session-$POLICY_NAME.yaml ; echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}' ; scone cas show-identification -c ; echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}' ; scone cas show-identification -s ; echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'; scone cas show-identification --session-encryption-key"
+    sh -c "set -e ; scone cas attest -G host.docker.internal; scone cas set-default host.docker.internal ; scone session create /identity/backup-controller-session-$POLICY_NAME.yaml ; echo Exit: '$?' ; scone session create /identity/provisioned.yaml ; echo Exit: '$?' ; echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}' ; scone cas show-identification -c ; echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}' ; scone cas show-identification -s ; echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'; scone cas show-identification --session-encryption-key"
 
 # next version: use encrypted policy and upload encrypted policy
 
