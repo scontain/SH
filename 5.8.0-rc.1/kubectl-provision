@@ -246,6 +246,7 @@ webhook_flag="--webhook"
 print_version_flag="--version"
 is_provisioned_flag="--is-provisioned"
 print_caskeys_flag="--print_caskeys"
+image_flag="--image-overwrite"
 
 DCAP_KEY="$DEFAULT_DCAP_KEY"  # Default DCAP API Key to used
 SVC=""
@@ -256,6 +257,7 @@ NO_BACKUP=0
 WEBHOOK=""
 is_provisioned=0
 print_caskeys=0
+image_overwrite=""
 
 usage ()
 {
@@ -299,7 +301,9 @@ usage ()
   echo "                  Checks if CAS is already provisioned and exists: Exits with an error in case it was not yet provisioned."
   echo "    $print_caskeys_flag"
   echo "                  Prints the CAS Key, the CAS Software Key and the CAS encryption key."
-  echo "    $version_flag VERSION"
+  echo "    $image_flag <IMAGE>"
+  echo "                  Replace the CAS image by the given image - mainly used for testing."
+  echo "    $version_flag <VERSION>"
   echo "                  Set the version of CAS"
   echo "    $help_flag"
   echo "                  Output this usage information and exit."
@@ -397,6 +401,15 @@ while [[ "$#" -gt 0 ]]; do
       print_caskeys=1
       shift # past argument
       ;;
+    ${image_flag})
+      image_overwrite="$2"
+      if [ ! -n "${image_overwrite}" ]; then
+        usage
+        error_exit "Error: Please specify a valid IMAGE ('$image_overwrite' is invalid)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
     $help_flag)
       usage
       exit 0
@@ -488,6 +501,11 @@ if [[ $EXISTS == 1 ]] ; then
 else
   IMAGE="$IMAGE_REPO/cas:$VERSION"
   IMAGE_BACKUP_CONTROLLER="$IMAGE_REPO/backup-controller:$VERSION"
+  if [[ "$image_overwrite" != "" ]]
+  then
+    warning "Using a non-standard CAS image $image_overwrite instead of $IMAGE"
+    IMAGE="$image_overwrite"
+  fi
 fi
 
 verbose "CAS Backup Image is '$IMAGE_BACKUP_CONTROLLER'"
