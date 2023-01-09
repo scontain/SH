@@ -290,7 +290,7 @@ usage ()
   echo "    $verbose_short_flag | $verbose_flag"
   echo "                  Enable verbose output"
   echo "    $debug_flag | debug_short_flag"
-  echo "                  Create debug image instead of a production image"
+  echo "                  Enabled debug mode"
   echo "    $webhook_flag <URL>"
   echo "                  Forward entries of the CAS audit log to the given URL"
   echo "    $file_flag | file_short_flag"

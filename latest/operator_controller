@@ -195,10 +195,10 @@ function check_namespace {
 apiVersion: v1
 kind: Namespace
 metadata:
-name: $NAMESPACE
-labels:
+  name: $NAMESPACE
+  labels:
     name: scone-system
-annotations:
+  annotations:
     scone-operator/inject-pull-secret:  "true"
     sconeapps/inject-pull-secret:  "true"
 EOF
