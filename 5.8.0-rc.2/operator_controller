@@ -33,7 +33,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
  - VERSION: it installs the "latest" version of the operator unless you define environment variable VERSION
  - REGISTRY: by default it uses registry "registry.scontain.com" to pull the operator unless you define env variable REGISTRY
- - MANIFESTS: by default we pull from  "https://raw.githubusercontent.com/scontain/operator-samples/main/$VERSION" - the manifests are VERSIONed
+ - MANIFESTS: by default we pull from  "https://raw.githubusercontent.com/scontain/manifests/main/$VERSION" - the manifests are VERSIONed
  - SCRIPTS: by default we pull from  "https://raw.githubusercontent.com/scontain/SH/main/$VERSION" - the scripts are VERSIONed
  - CHART: by default we pull the chart from  "https://raw.githubusercontent.com/scontain/operator/main/" 
     - the charts are VERSIONed: scone-operator-$VERSION.tgz
@@ -242,7 +242,7 @@ function check_secret {
         # and we reenable the pushing of this image
         if [[ $SECRET_OPERATOR == 1 ]] ; then
             verbose "  Re-enabling injection of secret $secret"
-            kubectl apply -f https://raw.githubusercontent.com/scontain/operator-samples/main/$VERSION/secrets_operator.yaml
+            kubectl apply -f https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/secrets_operator.yaml
         fi
     fi
     if ! kubectl get secret "$secret" -n "$namespace" > /dev/null 2>/dev/null
@@ -264,7 +264,6 @@ function check_secret {
 
 function set_urls() {
 
-
     if [[ "$HELM_CHART" == "" ]] ; then
         HELM_CHART="https://raw.githubusercontent.com/scontain/operator/main/scone-operator-$VERSION.tgz"
     else
@@ -272,13 +271,13 @@ function set_urls() {
     fi
 
     if [[ "$LAS_MANIFEST" == "" ]] ; then
-        LAS_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/$VERSION/las.yaml"
+        LAS_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/las.yaml"
     else
         warning "Using external LAS_MANIFEST=$LAS_MANIFEST"
     fi
 
     if [[ "$SGXPLUGIN_MANIFEST" == "" ]] ; then
-        SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/$VERSION/sgxplugin.yaml"
+        SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/sgxplugin.yaml"
     else
         warning "Using external SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
     fi
@@ -722,5 +721,5 @@ if [[ $SECRET_OPERATOR == 1 ]] ; then
         fi
     fi
     verbose "Ensuring that secrets 'sconeapps' and 'scone-operator-pull' are automatically available in all namespaces"
-    kubectl apply -f https://raw.githubusercontent.com/scontain/operator-samples/main/$VERSION/secrets_operator.yaml
+    kubectl apply -f https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/secrets_operator.yaml
 fi
