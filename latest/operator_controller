@@ -42,7 +42,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.1"
+export K_PROVISION_VERSION="5.8.0-rc.3"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -90,7 +90,7 @@ source "$CONFIG_FILE" 2>/dev/null || verbose "Note: could not load config file \
 
 
 if [[ "$VERSION" == "" ]] ; then
-    VERSION="$K_PROVISION_VERSION"
+    export VERSION="$K_PROVISION_VERSION"
 else
     warning "Using external VERSION=$VERSION"
 fi
@@ -679,7 +679,8 @@ if [[ $Fixit != 0 || "$VERSION" != "$KVERSION" ]] ; then
     if [[ $Fixit == 2 ]] ; then
         warning "SCONE kubectl plugin does not exist - must be deployed ($VERSION != $KVERSION)"
     else
-        echo "SCONE kubectl plugin must be updated"
+        verbose "SCONE kubectl plugin must be updated"
+
     fi
     if [[ $FIX == 1 ]] ; then
         if [[ $PLUGIN == 0 ]] ; then
