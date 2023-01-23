@@ -33,7 +33,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
  - VERSION: it installs the "latest" version of the operator unless you define environment variable VERSION
  - REGISTRY: by default it uses registry "registry.scontain.com" to pull the operator unless you define env variable REGISTRY
- - MANIFESTS: by default we pull from  "https://raw.githubusercontent.com/scontain/operator-samples/main/$VERSION" - the manifests are VERSIONed
+ - MANIFESTS: by default we pull from  "https://raw.githubusercontent.com/scontain/manifests/main/$VERSION" - the manifests are VERSIONed
  - SCRIPTS: by default we pull from  "https://raw.githubusercontent.com/scontain/SH/main/$VERSION" - the scripts are VERSIONed
  - CHART: by default we pull the chart from  "https://raw.githubusercontent.com/scontain/operator/main/" 
     - the charts are VERSIONed: scone-operator-$VERSION.tgz
@@ -42,7 +42,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.1"
+export K_PROVISION_VERSION="5.8.0-rc.3"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -51,17 +51,17 @@ export NC='\e[0m' # No Color
 
 function verbose () {
     if [[ $V -eq 1 ]]; then
-        echo -e "${BLUE}- $@${NC}"
+        echo -e "${BLUE}- $@${NC}"  >/dev/stderr
     fi
 }
 
 function warning () {
-    echo -e "${ORANGE}WARNING: $@${NC}"
+    echo -e "${ORANGE}WARNING: $@${NC}"  >/dev/stderr
 }
 
 function error_exit() {
   trap '' EXIT
-  echo -e "${RED}$1${NC}" 
+  echo -e "${RED}$1${NC}"   >/dev/stderr
   exit 1
 }
 
@@ -77,6 +77,7 @@ else
     CONFIG_FILE "Using external CONFIG_FILE=$CONFIG_FILE"
 fi
 
+
 # NOTE: verbose will only show up if you execute with "V=1 ./operator_controller" 
 source "$CONFIG_FILE" 2>/dev/null || verbose "Note: could not load config file \"$CONFIG_FILE\" - Ignoring."
 
@@ -89,7 +90,7 @@ source "$CONFIG_FILE" 2>/dev/null || verbose "Note: could not load config file \
 
 
 if [[ "$VERSION" == "" ]] ; then
-    VERSION="$K_PROVISION_VERSION"
+    export VERSION="$K_PROVISION_VERSION"
 else
     warning "Using external VERSION=$VERSION"
 fi
@@ -126,7 +127,11 @@ else
     warning "Using external IMPS_HELM_REPO=$IMPS_HELM_REPO"
 fi
 
-
+if [[ "$IMAGE_REPO" == "" ]] ; then
+  export IMAGE_REPO="registry.scontain.com/scone.cloud"
+else
+  warning "Using external IMAGE_REPO=$IMAGE_REPO"
+fi
 
 
 function check_prerequisites() {
@@ -165,11 +170,22 @@ function check_prerequisites() {
     fi
 
 
-    verbose "Checking that we have local access to the container images."
+    verbose "Checking that we have local access to container images repo $IMAGE_REPO."
 
-    PULL_IMAGE="registry.scontain.com/scone.cloud/k8soperators:$VERSION"
-    docker pull "$PULL_IMAGE" >/dev/null || exit_msg="No access to image $PULL_IMAGE!"
+    Fixit=0
+    PULL_IMAGE="$IMAGE_REPO/k8soperators:$VERSION"
+    docker pull "$PULL_IMAGE" 2>/dev/null || Fixit=2
 
+    if [[ $Fixit != 0 ]] ; then
+        warning "No access to images repo $IMAGE_REPO: cannot pull image $PULL_IMAGE"
+        if [[ $PLUGIN == 0 || $ACCOUNT_INFO == 0 ]] ; then
+            warning "set flags $deploy_plugin_flag $fix_flag to ensure that we fix locally pull container images"
+            exit_msg="Cannot access repo $IMAGE_REPO."
+        else
+            echo "$REGISTRY_ACCESS_TOKEN" | docker login --username "$REGISTRY_USERNAME" --password-stdin "$IMAGE_REPO" || error_exit "Login into repo $IMAGE_REPO failed. Please check credentials!"
+            docker pull "$PULL_IMAGE" >/dev/null || exit_msg="We cannot pull image $PULL_IMAGE - please check the credentials and the Image name!"
+        fi
+    fi
 
     if [[ "$exit_msg" != "" ]] ; then
         error_exit "$exit_msg"
@@ -217,16 +233,21 @@ function check_secret {
 
     if [[ $UPDATE == 1 &&  "$REGISTRY_USERNAME" != "" ]] ; then
         verbose "  Updating secret $secret"
-        kubectl delete secret "$secret" -n "$namespace" --ignore-not-found
-        NO_WARNING=1
-    else
-        NO_WARNING=0
+        if [[ $SECRET_OPERATOR == 1 ]] ; then
+            verbose "  Temporarily deleting automatic injection of $secret - to avoid that new secret is autmatically overwritten by old secret"
+            kubectl delete ImagePullSecret $secret || verbose "Deleting of ImagePullSecret $secret failed - ignoring." 
+        fi
+        # deletion of ImagePullSecret also removes the secret .. we can create a new one
+        kubectl create secret docker-registry --dry-run=client -o yaml "$secret" --docker-server="$REGISTRY" --docker-username="$REGISTRY_USERNAME"  --docker-password="$REGISTRY_ACCESS_TOKEN"  --docker-email="$REGISTRY_EMAIL" --namespace "$namespace" |  kubectl create -f - ; 
+        # and we reenable the pushing of this image
+        if [[ $SECRET_OPERATOR == 1 ]] ; then
+            verbose "  Re-enabling injection of secret $secret"
+            kubectl apply -f https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/secrets_operator.yaml
+        fi
     fi
     if ! kubectl get secret "$secret" -n "$namespace" > /dev/null 2>/dev/null
     then
-        if [[ NO_WARNING != 1 ]] ; then
-            warning "Secret '$secret' does not exist in namespace '$namespace'."
-        fi
+        warning "Secret '$secret' does not exist in namespace '$namespace'."
         if [[ $FIX == 1 ]] ; then
             verbose "  Fixing/Updating secret $secret"
             if [[ "$REGISTRY_USERNAME" == "" ]] ; then
@@ -243,7 +264,6 @@ function check_secret {
 
 function set_urls() {
 
-
     if [[ "$HELM_CHART" == "" ]] ; then
         HELM_CHART="https://raw.githubusercontent.com/scontain/operator/main/scone-operator-$VERSION.tgz"
     else
@@ -251,13 +271,13 @@ function set_urls() {
     fi
 
     if [[ "$LAS_MANIFEST" == "" ]] ; then
-        LAS_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/$VERSION/las.yaml"
+        LAS_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/las.yaml"
     else
         warning "Using external LAS_MANIFEST=$LAS_MANIFEST"
     fi
 
     if [[ "$SGXPLUGIN_MANIFEST" == "" ]] ; then
-        SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/operator-samples/main/$VERSION/sgxplugin.yaml"
+        SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/sgxplugin.yaml"
     else
         warning "Using external SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
     fi
@@ -509,14 +529,18 @@ if [[ $REGISTRY_USERNAME != "" || $REGISTRY_ACCESS_TOKEN != "" ||  $REGISTRY_EMA
     if [[ $REGISTRY_USERNAME == "" || $REGISTRY_ACCESS_TOKEN == "" ||  $REGISTRY_EMAIL == "" ]] ; then
         error_exit "You need to specify flags $user_flag, $token_flag, $token_flag"
     fi
+    export ACCOUNT_INFO=1
+else
+    export ACCOUNT_INFO=0
 fi
 
-check_prerequisites
 
 if [[ $UPDATE == 1 ]] ; then
     verbose "Updating / fixing all components"
     FIX=1
 fi
+
+check_prerequisites
 
 verbose "Checking cert-manager"
 
@@ -610,11 +634,10 @@ fi
 
 verbose "Checking SGXPlugin"
 
-
-
 if ! kubectl get sgxplugin "sgxplugin" > /dev/null 2>/dev/null
 then
-    warning "Custom Resource 'sgxplugin' does not yet exist."
+    warning "Custom Resource 'sgxplugin' does not yet exist. Waiting a little for the CRD to get ready."
+    sleep 30
     if [[ $FIX == 1 ]] ; then
         verbose "  Fixing by creating a sgxplugin resource using manifest '$SGXPLUGIN_MANIFEST'"
         kubectl apply -f "$SGXPLUGIN_MANIFEST"
@@ -628,8 +651,8 @@ else
     if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
         warning "Desired version of SCONE SGXPlugin is NOT installed!"
         if [[ $FIX == 1 ]] ; then
-            verbose "  Fixing the SGXPlugin"
-            warning "Not Yet Implemented (ToDo)"
+            verbose "  Fixing the SGXPlugin using $SGXPLUGIN_MANIFEST"
+            kubectl apply -f "$SGXPLUGIN_MANIFEST"
         fi
     fi
 fi
@@ -656,7 +679,8 @@ if [[ $Fixit != 0 || "$VERSION" != "$KVERSION" ]] ; then
     if [[ $Fixit == 2 ]] ; then
         warning "SCONE kubectl plugin does not exist - must be deployed ($VERSION != $KVERSION)"
     else
-        echo "SCONE kubectl plugin must be updated"
+        verbose "SCONE kubectl plugin must be updated"
+
     fi
     if [[ $FIX == 1 ]] ; then
         if [[ $PLUGIN == 0 ]] ; then
@@ -675,6 +699,8 @@ if [[ $Fixit != 0 || "$VERSION" != "$KVERSION" ]] ; then
 else
     verbose "  SCONE kubectl plugin is already installed"
 fi
+
+
 
 if [[ $SECRET_OPERATOR == 1 ]] ; then
     verbose "Checking if the secret operator exists"
@@ -695,4 +721,6 @@ if [[ $SECRET_OPERATOR == 1 ]] ; then
             helm install scone-imps $IMPS_HELM_CHART --namespace $NAMESPACE
         fi
     fi
+    verbose "Ensuring that secrets 'sconeapps' and 'scone-operator-pull' are automatically available in all namespaces"
+    kubectl apply -f https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/secrets_operator.yaml
 fi

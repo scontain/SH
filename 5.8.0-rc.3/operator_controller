@@ -51,17 +51,17 @@ export NC='\e[0m' # No Color
 
 function verbose () {
     if [[ $V -eq 1 ]]; then
-        echo -e "${BLUE}- $@${NC}"
+        echo -e "${BLUE}- $@${NC}"  >/dev/stderr
     fi
 }
 
 function warning () {
-    echo -e "${ORANGE}WARNING: $@${NC}"
+    echo -e "${ORANGE}WARNING: $@${NC}"  >/dev/stderr
 }
 
 function error_exit() {
   trap '' EXIT
-  echo -e "${RED}$1${NC}" 
+  echo -e "${RED}$1${NC}"   >/dev/stderr
   exit 1
 }
 
