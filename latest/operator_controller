@@ -173,7 +173,7 @@ function check_prerequisites() {
     verbose "Checking that we have local access to container images repo $IMAGE_REPO."
 
     Fixit=0
-    PULL_IMAGE="$IMAGE_REPO/k8soperators:$VERSION"
+    export PULL_IMAGE="$IMAGE_REPO/k8soperators:$VERSION"
     docker pull "$PULL_IMAGE" 2>/dev/null || Fixit=2
 
     if [[ $Fixit != 0 ]] ; then
@@ -583,47 +583,78 @@ INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.ch
 verbose "Installed version of the operator controller is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
 if [[ $UPDATE == 1 && "$INSTALLED_VERSION" != "$VERSION" ]] ; then
     verbose "  Updating the SCONE Operator"
-    helm upgrade --install scone-operator $HELM_CHART --namespace $NAMESPACE  --version $VERSION
+    helm upgrade --install scone-operator $HELM_CHART --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE
+    export INSTALLED_VERSION="$VERSION"
 fi
 
 if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
-    warning "Desired version of SCONE operator is NOT installed!"
+    warning "Desired version of SCONE operator is NOT installed ($INSTALLED_VERSION != $VERSION)!"
     if [[ $FIX == 1 ]] ; then
         verbose "  Fixing the SCONE Operator"
-        helm upgrade --install scone-operator $HELM_CHART --namespace $NAMESPACE --version $VERSION
+        helm upgrade --install scone-operator $HELM_CHART --namespace $NAMESPACE --version $VERSION  --set image=$PULL_IMAGE
     fi
 fi
 
 if ! kubectl describe crd sgxplugins > /dev/null 2>/dev/null
 then
-    warning "Custom Resource Definition 'sgxplugins' does not exist."
+    warning "Custom Resource Definition 'sgxplugins' does not yet exist - waiting for it to be created by the operator"
+    until kubectl get sgxplugin  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'sgxplugin' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
 fi
 
 if ! kubectl describe crd las > /dev/null 2>/dev/null
 then
-    warning "Custom Resource definition 'las' does not exist."
+    warning "Custom Resource definition 'las' does not yet exist - waiting for it to be created by the operator"
+    until kubectl get las  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'las' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
 fi
 
 
 if ! kubectl describe crd cas > /dev/null 2>/dev/null
 then
     warning "Custom Resource Definition 'cas' does not exist."
+    until kubectl get cas  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'cas' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
 fi
 
 if ! kubectl describe crd signedpolicies > /dev/null 2>/dev/null
 then
     warning "Custom Resource Definition 'signedpolicies' does not exist."
+    until kubectl get signedpolicies  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'signedpolicies' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
 fi
 
 if ! kubectl describe crd encryptedpolicies > /dev/null 2>/dev/null
 then
     warning "Custom Resource Definition 'encryptedpolicies' does not exist."
+    until kubectl get encryptedpolicies  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'encryptedpolicies' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
 fi
 
 
 if ! kubectl describe crd vaults > /dev/null 2>/dev/null
 then
     warning "Custom Resource Definition 'vaults' does not exist."
+    until kubectl get vaults  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'vaults' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
 fi
 
 
@@ -636,8 +667,6 @@ verbose "Checking SGXPlugin"
 
 if ! kubectl get sgxplugin "sgxplugin" > /dev/null 2>/dev/null
 then
-    warning "Custom Resource 'sgxplugin' does not yet exist. Waiting a little for the CRD to get ready."
-    sleep 30
     if [[ $FIX == 1 ]] ; then
         verbose "  Fixing by creating a sgxplugin resource using manifest '$SGXPLUGIN_MANIFEST'"
         kubectl apply -f "$SGXPLUGIN_MANIFEST"
@@ -710,7 +739,7 @@ if [[ $SECRET_OPERATOR == 1 ]] ; then
     if [[ $UPDATE == 1 && $SO != "0" ]] ; then
         verbose "  Updating the Secret Operator"
         helm repo add --force-update $IMPS_HELM_REPO
-        helm upgrade --install scone-imps $IMPS_HELM_CHART --namespace $NAMESPACE
+        helm upgrade --install scone-imps $IMPS_HELM_CHART --namespace $NAMESPACE 
     fi
 
     if [[ $SO == "0" ]] ; then
