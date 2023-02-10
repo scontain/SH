@@ -1,6 +1,8 @@
-# Helper script to install Intel SGX driver
+# Scontain Helper Scripts
 
-## Usage
+## Helper script to install Intel SGX driver
+
+### Usage
 
 ```
 Usage: install_sgx_driver.sh [COMMAND] [OPTIONS]...
@@ -42,15 +44,15 @@ The following options are supported by both commands:
   -h, --help           display this help and exit
 ```
 
-## Usage examples
+### Usage examples
 
-### To install the driver with both `metrics` and `page0` patch, run:
+#### To install the driver with both `metrics` and `page0` patch, run:
 
 ```bash
 $ curl -fsSL https://raw.githubusercontent.com/scontain/SH/master/install_sgx_driver.sh | bash -s - install -p metrics -p page0
 ```
 
-### To check the status of driver installation and 'metrics' patch, run:
+#### To check the status of driver installation and 'metrics' patch, run:
 
 ```bash
 $ curl -fsSL https://raw.githubusercontent.com/scontain/SH/master/install_sgx_driver.sh | bash -s - check -p metrics
