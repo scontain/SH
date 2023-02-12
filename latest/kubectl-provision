@@ -26,7 +26,10 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.4"
+export K_PROVISION_VERSION="5.8.0-rc.5"
+
+export K_SGX_TOLERATIONS="-G"
+
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -409,6 +412,8 @@ verify_flag="--verify"
 create_policy_flag="--vault-client"
 manifests_url_flag="--manifests-dir"
 image_repo_flag="--image-registry"
+set_tolerations="--set-tolerations"
+set_toleration="--set-toleration"
 
 export SVC=""
 # NAME is the name of the cas
@@ -422,6 +427,7 @@ image_overwrite=""
 issue_manifest=0
 do_verify=0
 do_create_policy=0
+do_help=0
 
 export VAULT_CAS="cas"
 
@@ -463,8 +469,7 @@ function set_defaults() {
   fi
 
   if [[ "$SGX_TOLERATIONS" == "" ]] ; then
-  #    export SGX_TOLERATIONS="--accept-group-out-of-date --accept-sw-hardening-needed --accept-configuration-needed"
-      export SGX_TOLERATIONS="-G"
+      export SGX_TOLERATIONS="$K_SGX_TOLERATIONS"
   else
       warning "Using external SGX_TOLERATIONS=$SGX_TOLERATIONS"
   fi
@@ -507,8 +512,6 @@ function set_defaults() {
 
 usage ()
 {
-  set_defaults
-
   echo ""
   echo "Usage:"
   echo "  kubectl provision SVC [NAME] [$ns_flag <kubernetes-namespace>] [$dcap_flag <API Key>] [$owner_flag <owner config>] [$verbose_flag] [$help_flag]"
@@ -575,6 +578,11 @@ usage ()
   echo "                  Replace the CAS image by the given image - mainly used for testing."
   echo "    $version_flag <VERSION>"
   echo "                  Set the version of CAS"
+  echo "    $set_tolerations \"<TOLERATIONS>\""
+  echo "                  Sets the tolerations, separated by spaces, that we permit when attesting SCONE CAS."
+  echo "                  Overwrites environment variable SGX_TOLERATIONS. Default is $K_SGX_TOLERATIONS"
+  echo "                  Example: \"--accept-group-out-of-date --accept-sw-hardening-needed --accept-configuration-needed\""
+  echo "                  See https://sconedocs.github.io/CAS_cli/#scone-cas-attest for more details."
   echo "    $help_flag"
   echo "                  Output this usage information and exit."
   echo "    $print_version_flag"
@@ -596,6 +604,7 @@ usage ()
   echo "  - CAS_MANIFEST_URL=\"$CAS_MANIFEST_URL\""
   echo "  - CAS_PROVISIONING_URL=\"$CAS_PROVISIONING_URL\""
   echo "  - CAS_BACKUP_POLICY_URL=\"$CAS_BACKUP_POLICY_URL\""
+  echo "  - SGX_TOLERATIONS=\"$SGX_TOLERATIONS\""
 }
 
 
@@ -700,10 +709,21 @@ while [[ "$#" -gt 0 ]]; do
       shift # past argument
       ;;
     ${version_flag})
-      VERSION="$2"
-      if [ ! -n "${VERSION}" ]; then
+      export VERSION=""
+      export K_PROVISION_VERSION="$2"
+      if [ ! -n "${K_PROVISION_VERSION}" ]; then
         usage
-        error_exit "Error: Please specify a valid VERSION ('$VERSION' is invalid)."
+        error_exit "Error: Please specify a valid VERSION ('$K_PROVISION_VERSION' is invalid)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${set_toleration} | ${set_tolerations})
+      export SGX_TOLERATIONS=""
+      export K_SGX_TOLERATIONS="$2"
+      if [ ! -n "${K_SGX_TOLERATIONS}" ]; then
+        usage
+        error_exit "Error: Please specify a valid SGX_TOLERATIONS ('$K_SGX_TOLERATIONS' is invalid)."
       fi
       shift # past argument
       shift || true # past value
@@ -738,11 +758,14 @@ while [[ "$#" -gt 0 ]]; do
       shift || true # past value
       ;;
     $help_flag)
-      usage
-      exit 0
+      do_help=1
+      shift
       ;;
     *)
-      if [[ "${SVC}" == "" ]]; then
+      if [[ $1 == -* ]] ; then
+        usage
+        error_exit "Error: Unknown argument passed: $1";
+      elif [[ "${SVC}" == "" ]]; then
         SVC="$1"
       elif [[ "${NAME}" == "" ]]; then
         NAME="$1"
@@ -756,6 +779,11 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 set_defaults
+
+if [ $do_help != 0 ] ; then
+  usage
+  exit 0
+fi
 
 if [[ "${SVC}" != "cas" && "${SVC}" != "vault"  ]]; then
     usage
