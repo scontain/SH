@@ -42,7 +42,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.4"
+export K_PROVISION_VERSION="5.8.0-rc.5"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -237,12 +237,14 @@ function check_secret {
             verbose "  Temporarily deleting automatic injection of $secret - to avoid that new secret is autmatically overwritten by old secret"
             kubectl delete ImagePullSecret $secret || verbose "Deleting of ImagePullSecret $secret failed - ignoring." 
         fi
-        # deletion of ImagePullSecret also removes the secret .. we can create a new one
+        # deletion of ImagePullSecret sometimes removes the secret .. if secrets operator already runs
+        # Hence, we delete secret - just to be sure.
+        kubectl delete secret $secret --namespace "$namespace" || verbose "As expected, deleting secret $secret in namespace $namespace failed."
         kubectl create secret docker-registry --dry-run=client -o yaml "$secret" --docker-server="$REGISTRY" --docker-username="$REGISTRY_USERNAME"  --docker-password="$REGISTRY_ACCESS_TOKEN"  --docker-email="$REGISTRY_EMAIL" --namespace "$namespace" |  kubectl create -f - ; 
         # and we reenable the pushing of this image
         if [[ $SECRET_OPERATOR == 1 ]] ; then
             verbose "  Re-enabling injection of secret $secret"
-            kubectl apply -f https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/secrets_operator.yaml
+            kubectl apply -f $SECRET_OPERATOR_MANIFEST
         fi
     fi
     if ! kubectl get secret "$secret" -n "$namespace" > /dev/null 2>/dev/null
@@ -288,6 +290,12 @@ function set_urls() {
         warning "Using external KUBECTLPLUGIN=$KUBECTLPLUGIN"
     fi
 
+    if [[ "$SECRET_OPERATOR_MANIFEST" == "" ]] ; then
+        SECRET_OPERATOR_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/secrets_operator.yaml"
+    else
+        warning "Using external SECRET_OPERATOR_MANIFEST=$SECRET_OPERATOR_MANIFEST"
+    fi
+
 
 }
 
@@ -296,7 +304,7 @@ function wait_for_cmd_success() {
     local cmd
     cmd=$1
     echo -n "Waiting for $cmd to succeed... "
-    timeout 31 bash -c "until $cmd &>/dev/null ; do sleep 0.5; done"
+    timeout 120 bash -c "until $cmd &>/dev/null ; do sleep 0.5; done"
     echo "OK"
 }
 
@@ -342,7 +350,7 @@ REGISTRY_USERNAME=""
 REGISTRY_ACCESS_TOKEN=""
 REGISTRY_EMAIL=""
 PLUGIN=0
-SECRET_OPERATOR=1
+SECRET_OPERATOR=0
 ONLY_OPERATOR=0
 
 # find directory on path where we are permitted to copy the plugin to
@@ -414,7 +422,9 @@ usage ()
   echo "  - LAS_MANIFEST=$LAS_MANIFEST"
   echo "  - SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
   echo "  - REGISTRY=$REGISTRY"
+  echo "  - IMAGE_REPO=$IMAGE_REPO"
   echo "  - KUBECTLPLUGIN=$KUBECTLPLUGIN"
+  echo "  - SECRET_OPERATOR_MANIFEST=$SECRET_OPERATOR_MANIFEST"
   echo "  - IMPS_HELM_CHART=$IMPS_HELM_CHART"
   echo "  - IMPS_HELM_REPO=$IMPS_HELM_REPO"
   echo "  - VERSION=$VERSION"
@@ -602,7 +612,7 @@ if [[ $SECRET_OPERATOR == 1 ]] ; then
         fi
     fi
     verbose "Ensuring that secrets 'sconeapps' and 'scone-operator-pull' are automatically available in all namespaces"
-    kubectl apply -f https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/secrets_operator.yaml
+    kubectl apply -f $SECRET_OPERATOR_MANIFEST
 fi
 
 check_secret "scone-operator-pull" "$NAMESPACE"
@@ -616,7 +626,11 @@ INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.ch
 verbose "Installed version of the operator controller is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
 if [[ $UPDATE == 1 && "$INSTALLED_VERSION" != "$VERSION" ]] ; then
     verbose "  Updating the SCONE Operator: helm upgrade --install scone-operator $HELM_CHART --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE"
-    curl -LJ $HELM_CHART -o scone-operator.tgz
+    if [[ $HELM_CHART == https://* ]] ; then
+        curl -fsSL "$HELM_CHART"  -o scone-operator.tgz || error_exit "Failed to download the SCONE Operator helm chart from $HELM_CHART"
+    else
+        cat $HELM_CHART > scone-operator.tgz || error_exit "Failed to read local SGXPLUGIN manifest file $SGXPLUGIN_MANIFEST"
+    fi
     tar -xzf scone-operator.tgz
     rm scone-operator.tgz
     helm upgrade --install scone-operator ./scone-operator --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE
@@ -627,7 +641,11 @@ if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
     warning "Desired version of SCONE operator is NOT installed ($INSTALLED_VERSION != $VERSION)!"
     if [[ $FIX == 1 ]] ; then
         verbose "  Fixing the SCONE Operator"
-        curl -LJ $HELM_CHART -o scone-operator.tgz
+        if [[ $HELM_CHART == https://* ]] ; then
+            curl -fsSL "$HELM_CHART"  -o scone-operator.tgz || error_exit "Failed to download the SCONE Operator helm chart from $HELM_CHART"
+        else
+            cat $HELM_CHART > scone-operator.tgz || error_exit "Failed to read local SGXPLUGIN manifest file $SGXPLUGIN_MANIFEST"
+        fi
         tar -xzf scone-operator.tgz
         rm scone-operator.tgz
         helm upgrade --install scone-operator $HELM_CHART --namespace $NAMESPACE --version $VERSION  --set image=$PULL_IMAGE
@@ -729,7 +747,7 @@ else
         warning "Desired version of SCONE SGXPlugin is NOT installed!"
         if [[ $FIX == 1 ]] ; then
             verbose "  Fixing the SGXPlugin using $SGXPLUGIN_MANIFEST"
-            kubectl apply -f ".sgxplugin-manifest.yaml"
+            wait_for_cmd_success "kubectl apply -f .sgxplugin-manifest.yaml"
         fi
     fi
 fi
