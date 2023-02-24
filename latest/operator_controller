@@ -42,7 +42,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.5"
+export K_PROVISION_VERSION="5.8.0-rc.6"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -336,6 +336,7 @@ secret_operator_flag="--secret-operator"
 version_flag="--set-version"
 print_version_flag="--version"
 only_controller_flag="--only-operator"
+no_sgxplugin="--no-sgxplugin"
 
 NAMESPACE="$DEFAULT_NAMESPACE"
 repo="$APP_IMAGE_REPO"
@@ -352,6 +353,7 @@ REGISTRY_EMAIL=""
 PLUGIN=0
 SECRET_OPERATOR=0
 ONLY_OPERATOR=0
+RUN_SGXPLUGIN=1
 
 # find directory on path where we are permitted to copy the plugin to
 
@@ -412,6 +414,8 @@ usage ()
   echo "                  Create debug image instead of a production image"
   echo "    $version_flag VERSION"
   echo "                  Set the version of the helm chart"
+  echo "    $no_sgxplugin" 
+  echo "                  Set this flag in case you do not want to install the SGXPlugin."
   echo "    $help_flag"
   echo "                  Output this usage information and exit."
   echo ""
@@ -530,6 +534,10 @@ while [[ "$#" -gt 0 ]]; do
       echo "$VERSION"
       exit 0
       ;;
+    ${no_sgxplugin})
+      RUN_SGXPLUGIN=0
+      shift # past argument
+      ;;
     ${help_flag})
       set_urls
       usage
@@ -629,7 +637,7 @@ if [[ $UPDATE == 1 && "$INSTALLED_VERSION" != "$VERSION" ]] ; then
     if [[ $HELM_CHART == https://* ]] ; then
         curl -fsSL "$HELM_CHART"  -o scone-operator.tgz || error_exit "Failed to download the SCONE Operator helm chart from $HELM_CHART"
     else
-        cat $HELM_CHART > scone-operator.tgz || error_exit "Failed to read local SGXPLUGIN manifest file $SGXPLUGIN_MANIFEST"
+        cat $HELM_CHART > scone-operator.tgz || error_exit "Failed to read local SCONE Operator HELM chart file $HELM_CHART"
     fi
     tar -xzf scone-operator.tgz
     rm scone-operator.tgz
@@ -644,7 +652,7 @@ if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
         if [[ $HELM_CHART == https://* ]] ; then
             curl -fsSL "$HELM_CHART"  -o scone-operator.tgz || error_exit "Failed to download the SCONE Operator helm chart from $HELM_CHART"
         else
-            cat $HELM_CHART > scone-operator.tgz || error_exit "Failed to read local SGXPLUGIN manifest file $SGXPLUGIN_MANIFEST"
+            cat $HELM_CHART > scone-operator.tgz || error_exit "Failed to read local SCONE Operator helm chart file $HELM_CHART"
         fi
         tar -xzf scone-operator.tgz
         rm scone-operator.tgz
@@ -723,35 +731,38 @@ fi
 
 verbose "Checking SGXPlugin"
 
-if [[ $SGXPLUGIN_MANIFEST == https://* ]] ; then
-    curl -fsSL "$SGXPLUGIN_MANIFEST"  -o ".sgxplugin-manifest.template" || error_exit "Failed to download the SGXPLUGIN manifest from $SGXPLUGIN_MANIFEST"
-else
-    cat "$SGXPLUGIN_MANIFEST" > ".sgxplugin-manifest.template" || error_exit "Failed to read local SGXPLUGIN manifest file $SGXPLUGIN_MANIFEST"
-fi
-envsubst < ".sgxplugin-manifest.template" > ".sgxplugin-manifest.yaml"
-
-
-if ! kubectl get sgxplugin "sgxplugin" > /dev/null 2>/dev/null
-then
-    if [[ $FIX == 1 ]] ; then
-        verbose "  Fixing by creating a sgxplugin resource using manifest '$SGXPLUGIN_MANIFEST'"
-        wait_for_cmd_success "kubectl apply -f .sgxplugin-manifest.yaml"
+if [[ $RUN_SGXPLUGIN == 1 ]] ; then 
+    if [[ $SGXPLUGIN_MANIFEST == https://* ]] ; then
+        curl -fsSL "$SGXPLUGIN_MANIFEST"  -o ".sgxplugin-manifest.template" || error_exit "Failed to download the SGXPLUGIN manifest from $SGXPLUGIN_MANIFEST"
+    else
+        cat "$SGXPLUGIN_MANIFEST" > ".sgxplugin-manifest.template" || error_exit "Failed to read local SGXPLUGIN manifest file $SGXPLUGIN_MANIFEST"
     fi
-else
-    verbose "Custom Resource 'sgxplugin' does already exists"
-    INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.chart | startswith("sgxdevplugin-"))' | jq '(.chart |  ltrimstr("sgxdevplugin-"))' | tr -d '"')
+    envsubst < ".sgxplugin-manifest.template" > ".sgxplugin-manifest.yaml"
 
-    verbose "Installed version of the SGXPlugin is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
 
-    if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
-        warning "Desired version of SCONE SGXPlugin is NOT installed!"
+    if ! kubectl get sgxplugin "sgxplugin" > /dev/null 2>/dev/null
+    then
         if [[ $FIX == 1 ]] ; then
-            verbose "  Fixing the SGXPlugin using $SGXPLUGIN_MANIFEST"
+            verbose "  Fixing by creating a sgxplugin resource using manifest '$SGXPLUGIN_MANIFEST'"
             wait_for_cmd_success "kubectl apply -f .sgxplugin-manifest.yaml"
         fi
-    fi
-fi
+    else
+        verbose "Custom Resource 'sgxplugin' does already exists"
+        INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.chart | startswith("sgxdevplugin-"))' | jq '(.chart |  ltrimstr("sgxdevplugin-"))' | tr -d '"')
 
+        verbose "Installed version of the SGXPlugin is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
+
+        if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
+            warning "Desired version of SCONE SGXPlugin is NOT installed!"
+            if [[ $FIX == 1 ]] ; then
+                verbose "  Fixing the SGXPlugin using $SGXPLUGIN_MANIFEST"
+                wait_for_cmd_success "kubectl apply -f .sgxplugin-manifest.yaml"
+            fi
+        fi
+    fi
+else
+    verbose "Skipping installation of SGX Plugin"
+fi
 
 if ! kubectl get "las" "las" > /dev/null 2>/dev/null
 then
