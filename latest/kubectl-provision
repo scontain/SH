@@ -26,9 +26,11 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.6"
-
+export K_PROVISION_VERSION="5.8.0-rc.7"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
+export K_MRSIGNER="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
+export K_ISVPRODID="41316"
+export K_ISVSVN="5"
 
 export RED='\e[31m'
 export BLUE='\e[34m'
@@ -163,7 +165,6 @@ function session_hash {
 #  export SGX_TOLERATIONS="-G -C -S --only_for_testing-ignore-signer --only_for_testing-trust-any --only_for_testing-debug"
 
   docker run --rm --platform linux/amd64 \
-      --network=host \
       --add-host=host.docker.internal:host-gateway \
       -v ~/.cas/identity:/identity \
       -e SCONE_CLI_CONFIG="/identity/config.json" \
@@ -172,7 +173,7 @@ function session_hash {
       -e POLICY_NAME="$POLICY" \
       -e SCONE_MODE="sim" \
       registry.scontain.com/scone.cloud/crosscompilers \
-      sh -c "scone cas attest $SGX_TOLERATIONS $SCONE_CAS_ADDR >/dev/stderr ; scone cas set-default $SCONE_CAS_ADDR  ;   scone session read $POLICY > session.tmp;  scone session verify session.tmp ; "
+      sh -c "set -e ; scone cas attest $SGX_TOLERATIONS $SCONE_CAS_ADDR ; scone cas set-default $SCONE_CAS_ADDR  ;   scone session read $POLICY > session.tmp;  scone session verify session.tmp ; "
 
   if [[ $SERVICE_PID != 0 ]] ; then
       verbose "Shutting down port-forwarding"
@@ -307,7 +308,6 @@ verbose "  portforward set up - uploading session next"
 export SCONE_ESCAPE_HACK="\$SCONE"
 
 docker run --rm --platform linux/amd64 --pull always \
-    --network=host \
     --add-host=host.docker.internal:host-gateway \
     -v "$TARGET_DIR"/identity:/identity \
     -e SCONE_CLI_CONFIG="/identity/config.json" \
@@ -322,7 +322,7 @@ docker run --rm --platform linux/amd64 --pull always \
     -e POLICY_FILE="$path_in_container" \
     -e SCONE_NO_TIME_THREAD=1 \
     $IMAGE_REPO/${IMAGE_PREFIX}sconecli:$VERSION \
-    sh -c "scone cas attest $SGX_TOLERATIONS host.docker.internal  && scone cas set-default host.docker.internal && export SCONE_CAS_ADDR=\$CLUSTER_SCONE_CAS_ADDR && export OWNER=\$(scone self show-key-hash) && scone session create --use-env \$POLICY_FILE"
+    sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal  && scone cas set-default host.docker.internal && export SCONE_CAS_ADDR=\$CLUSTER_SCONE_CAS_ADDR && export OWNER=\$(scone self show-key-hash) && scone session create --use-env \$POLICY_FILE"
 
 echo "OK"
 }
@@ -334,7 +334,7 @@ function check_if_provisioned {
 
   if ! kubectl get cas "$NAME" -n "$NAMESPACE" 2> /dev/null >/dev/null
   then
-    verbose "No CAS $NAME is running in namespace $NAMESPACE"
+    warning "No CAS $NAME is running in namespace $NAMESPACE"
     trap '' EXIT
     return 1
   fi
@@ -347,7 +347,6 @@ function check_if_provisioned {
 
 
   RESULT=$(docker run --rm --platform linux/amd64 --pull always \
-      --network=host \
       --add-host=host.docker.internal:host-gateway \
       -v "$TARGET_DIR"/identity:/identity \
       -v "$TARGET_DIR"/owner-config:/owner-config \
@@ -359,7 +358,7 @@ function check_if_provisioned {
       -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
       -e SCONE_NO_TIME_THREAD=1 \
       $IMAGE_REPO/${IMAGE_PREFIX}sconecli:$VERSION \
-      bash -c 'scone cas attest $SGX_TOLERATIONS host.docker.internal  >/dev/null 2>/dev/null; scone cas set-default host.docker.internal ;  scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "CAS is NOT provisioned" ; else  echo "CAS is provisioned" ; fi ' | tail -1 )
+      bash -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal ; scone cas set-default host.docker.internal ;  scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "CAS is NOT provisioned" ; else  echo "CAS is provisioned" ; fi ' | tail -1 )
 
   kill $SERVICE_PID
   if [[ $RESULT == "CAS is provisioned"* ]] ; then
@@ -393,7 +392,6 @@ function print_cas_keys {
 
 
   docker run --rm --platform linux/amd64 --pull always \
-      --network=host \
       --add-host=host.docker.internal:host-gateway \
       -v "$TARGET_DIR"/identity:/identity \
       -v "$TARGET_DIR"/owner-config:/owner-config \
@@ -437,7 +435,6 @@ kill -0 $SERVICE_PID &>/dev/null || error_exit "It looks like that either port '
 verbose "retrieveing public keys .. might take a few seconds"
 
 docker run --rm --platform linux/amd64 --pull always \
-      --network=host \
       --add-host=host.docker.internal:host-gateway \
       -v "$TARGET_DIR"/cas-certs:/cas-certs \
       -v "$TARGET_DIR"/vault-certs:/vault-certs \
@@ -448,11 +445,12 @@ docker run --rm --platform linux/amd64 --pull always \
       -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
       -e POLICY_NAME="$POLICY_NAME" \
       -e SCONE_LOG="ERROR" \
+      -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
       -e CAS="$CAS" \
       -e NAMESPACE="$NAMESPACE" \
       -e SCONE_NO_TIME_THREAD=1 \
       $IMAGE_REPO/${IMAGE_PREFIX}sconecli:$VERSION \
-      bash -c 'scone cas attest -G host.docker.internal >/dev/null 2>/dev/null; scone cas set-default host.docker.internal ; scone cas show-identification --cas-software-certificate   > "/cas-certs/${CAS}_${NAMESPACE}.cert"' || { kill -9 $SERVICE_PID ; error_exit "Failed to determine CAS certificate of $SVCNAME in namespace $NAMESPACE." ; }
+      bash -c 'set -e ; scone cas attest $SGX_TOLERATIONS -G host.docker.internal >/dev/null 2>/dev/null; scone cas set-default host.docker.internal ; scone cas show-identification --cas-software-certificate   > "/cas-certs/${CAS}_${NAMESPACE}.cert"' || { kill -9 $SERVICE_PID ; error_exit "Failed to determine CAS certificate of $SVCNAME in namespace $NAMESPACE." ; }
 
 export OWNER_ID=$(kubectl get vault $VAULT_NAME -n $NAMESPACE -ojsonpath='{.spec.server.extraEnvironmentVars.OWNER_ID}' || error_exit "cannot determine Vault Ownership" )
 
@@ -566,7 +564,7 @@ function set_defaults() {
   fi
 
   if [[ "$SGX_TOLERATIONS" == "" ]] ; then
-      export SGX_TOLERATIONS="$K_SGX_TOLERATIONS"
+      export SGX_TOLERATIONS="$K_SGX_TOLERATIONS --isvprodid $K_ISVPRODID --isvsvn $K_ISVSVN --mrsigner $K_MRSIGNER"
   else
       warning "Using external SGX_TOLERATIONS=$SGX_TOLERATIONS"
   fi
@@ -1058,11 +1056,11 @@ then
 
 
     docker run --rm --platform linux/amd64 \
-      --network=host \
       --add-host=host.docker.internal:host-gateway \
       -v ~/.cas/identity:/identity \
       -e SCONE_CLI_CONFIG="/identity/config.json" \
       -e SCONE_CAS_ADDR="$SCONE_CAS_ADDR" \
+      -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
       -e SCONE_NO_TIME_THREAD=1 \
       -e POLICY_NAME="$POLICY_NAME" \
       -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
@@ -1070,7 +1068,7 @@ then
       -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
       -e SCONE_MODE="sim" \
       registry.scontain.com/scone.cloud/crosscompilers \
-      sh -c 'scone cas attest $SGX_TOLERATIONS $SCONE_CAS_ADDR ; scone cas set-default $SCONE_CAS_ADDR  ;   scone session read $POLICY_NAME > /identity/session.tmp ;  HASH=`scone session verify /identity/session.tmp` ; echo HASH=$HASH ; sed -i "s/^predecessor: .*\$/predecessor: ${HASH}/g" /identity/session.tmp ; sed -i "s/${OLD_SCONE_CLI_MRENCLAVE}/${SCONE_CLI_MRENCLAVE}/g" /identity/session.tmp ; scone session update /identity/session.tmp'
+      sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS $SCONE_CAS_ADDR ; scone cas set-default $SCONE_CAS_ADDR  ;   scone session read $POLICY_NAME > /identity/session.tmp ;  HASH=`scone session verify /identity/session.tmp` ; echo HASH=$HASH ; sed -i "s/^predecessor: .*\$/predecessor: ${HASH}/g" /identity/session.tmp ; sed -i "s/${OLD_SCONE_CLI_MRENCLAVE}/${SCONE_CLI_MRENCLAVE}/g" /identity/session.tmp ; scone session update /identity/session.tmp'
 
     if [[ $SERVICE_PID != 0 ]] ; then
         verbose "Shutting down port-forwarding"
@@ -1412,7 +1410,6 @@ EOF
   kill -0 $SERVICE_PID &>/dev/null || error_exit "It looks like that either port $CAS_CLIENT_PORT is not available on your local machine or the service $SVCNAME is not running. Bailing!"
 
   docker run --platform linux/amd64 --pull always \
-      --network=host \
       --add-host=host.docker.internal:host-gateway \
       -v "$TARGET_DIR/"/identity:/identity \
       -v "$TARGET_DIR"/owner-config:/owner-config \
@@ -1461,7 +1458,6 @@ EOF
 
 
 docker run --rm --platform linux/amd64 --pull always \
-    --network=host \
     --add-host=host.docker.internal:host-gateway \
     -v "$TARGET_DIR"/identity:/identity \
     -v "$TARGET_DIR"/owner-config:/owner-config \
@@ -1472,7 +1468,7 @@ docker run --rm --platform linux/amd64 --pull always \
     -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
     -e SCONE_NO_TIME_THREAD=1 \
     $IMAGE_REPO/${IMAGE_PREFIX}sconecli:$VERSION \
-    sh -c "export SCONE_MODE=sim; scone cas attest $SGX_TOLERATIONS host.docker.internal ; scone cas set-default host.docker.internal ; scone session create /identity/backup-controller-session-$POLICY_NAME.yaml ; echo 'Exit:' $? ; scone session create /identity/provisioned.yaml ; echo Exit: '$?' ; echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}' ; scone cas show-identification -c ; echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}' ; scone cas show-identification -s ; echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'; scone cas show-identification --session-encryption-key"
+    sh -c "export SCONE_MODE=sim; set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal ; scone cas set-default host.docker.internal ; scone session create /identity/backup-controller-session-$POLICY_NAME.yaml ; echo 'Exit:' $? ; scone session create /identity/provisioned.yaml ; echo Exit: '$?' ; echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}' ; scone cas show-identification -c ; echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}' ; scone cas show-identification -s ; echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'; scone cas show-identification --session-encryption-key"
 
 fi
 
@@ -1593,7 +1589,6 @@ sleep 5
 kill -0 $SERVICE_PID &>/dev/null || error_exit "It looks like that either port $CAS_CLIENT_PORT is not available on your local machine or the service $SVCNAME is not running. Bailing!"
 
 docker run --rm --platform linux/amd64 --pull always \
-    --network=host \
     --add-host=host.docker.internal:host-gateway \
     -v "$TARGET_DIR"/identity:/identity \
     -e SCONE_CLI_CONFIG="/identity/config.json" \
@@ -1618,7 +1613,7 @@ docker run --rm --platform linux/amd64 --pull always \
     -v "$TARGET_DIR"/policies:/policies \
     -e SCONE_NO_TIME_THREAD=1 \
     $IMAGE_REPO/${IMAGE_PREFIX}sconecli:$VERSION \
-    sh -c "scone cas attest $SGX_TOLERATIONS host.docker.internal  && scone cas set-default host.docker.internal && export SCONE_CAS_ADDR=\$CLUSTER_SCONE_CAS_ADDR && export OWNER=\$(scone self show-key-hash) && scone session create --use-env /policies/session.yaml && scone session create --use-env /policies/verify.yaml"
+    sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal  && scone cas set-default host.docker.internal && export SCONE_CAS_ADDR=\$CLUSTER_SCONE_CAS_ADDR && export OWNER=\$(scone self show-key-hash) && scone session create --use-env /policies/session.yaml && scone session create --use-env /policies/verify.yaml"
 
 #$VAULT_IMAGE 
 
