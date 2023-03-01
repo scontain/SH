@@ -26,7 +26,7 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.7"
+export K_PROVISION_VERSION="5.8.0-rc.8"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_ISVPRODID="41316"
@@ -193,14 +193,14 @@ verbose "  SCONE_CAS_ADDR=$SCONE_CAS_ADDR ; OWNER_ID=$OWNER_ID"
 
 mkdir -p "$TARGET_DIR"/vault-certs
 
-kubectl get vault $VAULT_NAME -n $NAMESPACE -ojsonpath='{.status.initStatement}' > $TARGET_DIR/vault-certs/statement || error_exit "Could not retrieve InitStatement of Vault $VAULT_NAME in namespace $NAMESPACE. Please check that it is running."
+kubectl get vault $VAULT_NAME -n $NAMESPACE -ojsonpath='{.status.initStatement}' > $TARGET_DIR/vault-certs/statement_${VAULT_NAME}_${NAMESPACE} || error_exit "Could not retrieve InitStatement of Vault $VAULT_NAME in namespace $NAMESPACE. Please check that it is running."
 
-verbose "  statement=$(cat $TARGET_DIR/vault-certs/statement)"
+verbose "  statement=$(cat $TARGET_DIR/vault-certs/statement_${VAULT_NAME}_${NAMESPACE})"
 
 # Create a secret from the statement
-kubectl delete secret generic verifier-statement  > /dev/null 2> /dev/null || true
-kubectl create secret generic verifier-statement --from-file $TARGET_DIR/vault-certs/statement -n $NAMESPACE > /dev/null
-kubectl delete pod vault-verifier > /dev/null 2> /dev/null || true
+kubectl delete secret -n $NAMESPACE verifier-statement-${VAULT_NAME}-${NAMESPACE}  > /dev/null 2> /dev/null || true
+kubectl create secret generic verifier-statement-${VAULT_NAME}-${NAMESPACE} --from-file=statement=$TARGET_DIR/vault-certs/statement_${VAULT_NAME}_${NAMESPACE} -n $NAMESPACE > /dev/null
+kubectl delete pod -n $NAMESPACE vault-verifier-${VAULT_NAME}-${NAMESPACE} > /dev/null 2> /dev/null || true
 
 export VAULT_IMAGE_REPO="$IMAGE_REPO/${IMAGE_PREFIX}vault"
 export VAULT_IMAGE_TAG="$VERSION"
@@ -228,17 +228,17 @@ fi
 
 SCONE="\$SCONE" envsubst < "$template_file" > "$verifier_manifest"
 
-kubectl apply -f "$verifier_manifest">/dev/null
+kubectl apply -n $NAMESPACE -f "$verifier_manifest">/dev/null
 
 Result=""
 until [[ "$Result" == "terminated:" ]]
 do
-  verbose "waiting for pod vault-verifier to terminate"
+  verbose "waiting for pod vault-verifier-$VAULT_NAME-$NAMESPACE to terminate"
   sleep 5
-  Result=$(kubectl get pod  vault-verifier -o yaml | grep "terminated:"  | tr -d ' ')
+  Result=$(kubectl get pod -n $NAMESPACE vault-verifier-$VAULT_NAME-$NAMESPACE -o yaml | grep "terminated:"  | tr -d ' ')
 done
 
-kubectl logs vault-verifier -f | tail -1
+kubectl logs -n $NAMESPACE vault-verifier-$VAULT_NAME-$NAMESPACE -f | tail -1
 
 }
 
@@ -290,7 +290,7 @@ else
   cp "$POLICY" "$template_file"|| error_exit "Failed to copy local policy file $POLICY to $template_file"
 fi
 
-SCONE="\$SCONE" OWNER="\$OWNER" envsubst < "$template_file" > "$policy_manifest"
+VAULT_ADDR="https://${VAULT_NAME}.${NAMESPACE}.svc:8200" VAULT_CLUSTER_ADDR="https://${VAULT_NAME}.${NAMESPACE}.svc:8201" envsubst '${OWNER_ID},$OWNER_ID,${VAULT_CLUSTER_ADDR},$VAULT_CLUSTER_ADDR,${VAULT_ADDR},$VAULT_ADDR' < "$template_file" > "$policy_manifest"
 
 verbose "  instantiated policy: $policy_manifest"
 
@@ -1568,10 +1568,12 @@ verbose "Downloading policies"
 mkdir -p "$TARGET_DIR"/policies
 
 if [[ $VAULT_POLICY_URL == https://* ]] ; then
-  curl -fsSL "$VAULT_POLICY_URL"  -o "$TARGET_DIR/policies/session.yaml" || error_exit "Failed to download the vault policy from $VAULT_POLICY_URL"
+  curl -fsSL "$VAULT_POLICY_URL"  -o "$TARGET_DIR/policies/session.yaml.template" || error_exit "Failed to download the vault policy from $VAULT_POLICY_URL"
 else
-  cat "$VAULT_POLICY_URL" > "$TARGET_DIR/policies/session.yaml" || error_exit "Failed to read local vault policy file $VAULT_POLICY_URL into $TARGET_DIR"
+  cat "$VAULT_POLICY_URL" > "$TARGET_DIR/policies/session.yaml.template" || error_exit "Failed to read local vault policy file $VAULT_POLICY_URL into $TARGET_DIR"
 fi
+
+VAULT_ADDR="https://${VAULT_NAME}.${NAMESPACE}.svc:8200" VAULT_CLUSTER_ADDR="https://${VAULT_NAME}.${NAMESPACE}.svc:8201" envsubst '${OWNER_ID},$OWNER_ID,${VAULT_CLUSTER_ADDR},$VAULT_CLUSTER_ADDR,${VAULT_ADDR},$VAULT_ADDR' < "$TARGET_DIR/policies/session.yaml.template" > "$TARGET_DIR/policies/session.yaml"
 
 if [[ $VAULT_VERIFY_POLICY_URL == https://* ]] ; then
   curl -fsSL "$VAULT_VERIFY_POLICY_URL"  -o "$TARGET_DIR/policies/verify.yaml" || error_exit "Failed to download the vault verify policy from $VAULT_VERIFY_POLICY_URL"
