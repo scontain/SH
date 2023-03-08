@@ -42,7 +42,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.9"
+export K_PROVISION_VERSION="5.8.0-rc.10"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -127,11 +127,111 @@ else
     warning "Using external IMPS_HELM_REPO=$IMPS_HELM_REPO"
 fi
 
+export SCONTAIN_IMAGE_REPO="registry.scontain.com/scone.cloud"
+
 if [[ "$IMAGE_REPO" == "" ]] ; then
-  export IMAGE_REPO="registry.scontain.com/scone.cloud"
+    export IMAGE_REPO="$SCONTAIN_IMAGE_REPO"
 else
-  warning "Using external IMAGE_REPO=$IMAGE_REPO"
+    warning "Using external IMAGE_REPO=$IMAGE_REPO"
 fi
+
+#
+# Public Key used to sign manifests
+#
+
+SIGNER="5BCAD31DCC8D5D722B7B7ABD2EBE04E7CC816D32"
+
+
+#
+# verify signed manifests
+#
+
+function verify_file() {
+    file=$1
+    gpg  --verify --status-fd=1 --verify "$file.asc" "$file" 2> /dev/null | grep -e "VALIDSIG $SIGNER" >/dev/null
+}
+
+# download/copy files
+#
+# Arguments:  url, output
+#
+# - url:
+#   - **remote file**  starts with https://
+#   - **local file** does NOT start with https://
+# - output:
+#   - file location to store or copy the file
+#
+# This function download remote files and verify signature.
+# This function copies local files, i.e., does NOT verify any signatures.
+#
+
+function download_file() {
+    url="$1"
+    output="$2"
+
+    verbose "  Downloading $url"
+    if [[ "$url" == https://* ]] ; then
+        curl -fsSL "$url"  -o "$output" || error_exit "Failed to download file $url."
+        curl -fsSL "$url.asc"  -o "${output}.asc" || error_exit "Failed to download signature file $url.asc."
+    else
+        cat $url > "$output" || error_exit "Failed to read local file $url"
+        cat "${url}.asc" > "${output}.asc" || true
+    fi
+    if [[ "$url" == https://raw.githubusercontent.com/scontain* ]]; then
+        verbose "  Verifying signature of $url"
+        verify_file "$output" || error_exit "Signature of file '$file' is incorrect"
+    else
+        # we try to verify also in this case since it might be a local scontain file with valid signature
+        verify_file "$output" || warning "  Skipping signature verification for $url, due to unknown origin."
+    fi
+}
+
+#
+# create a file with the public key of the signer key for all scone.cloud images
+#
+
+function create_cosign_verification_key() {
+    export cosign_public_key_file="$(mktemp).pub"
+    cat > $cosign_public_key_file <<EOF
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAErLf0HT8xZlLaoX5jNN8aVL1Yrs+P
+wS7K6tXeRlWLlUX1GeEtTdcuhZMKb5VUNaWEJW2ZU0YIF91D93dCZbUYpw==
+-----END PUBLIC KEY-----
+EOF
+}
+
+#
+# verify that a container image was properly signed by Scontain
+#
+
+function verify_image() {
+    local image_name
+    local version
+    local image
+    image_name="$1"
+    version="$2"
+
+    if [[ "$image_name" == "" ]]; then
+        error_exit "The name of the image for which we should verify the signature, was empty. Exiting."
+    fi
+    if [[ "$version" == "" ]]; then
+        error_exit "The version of the image for which we should verify the signature, was empty. Exiting."
+    fi
+
+    image="$IMAGE_REPO/${IMAGE_PREFIX}$image_name:$version"
+    if [[ ( "$IMAGE_REPO" != "$SCONTAIN_IMAGE_REPO" || "$IMAGE_PREFIX" != "" ) && "$cosign_public_key_file" == "" ]]; then
+        warning "Skipping image verification of image '$image' since the public key is unknown (the key can be specified with $verify_sign_key_flag)"
+        return
+    fi
+
+    verbose "Verifying the signature of image '$image'"
+    docker pull "$image"
+    if [[ "$cosign_public_key_file" == "" ]]; then
+        create_cosign_verification_key
+    fi
+    cosign verify --key "$cosign_public_key_file" "$image" >/dev/null 2> /dev/null || error_exit "Failed to verify signature of image '$image'! Exiting!"
+    verbose "  verification was successful"
+}
 
 
 function check_prerequisites() {
@@ -267,19 +367,19 @@ function check_secret {
 function set_urls() {
 
     if [[ "$HELM_CHART" == "" ]] ; then
-        HELM_CHART="https://raw.githubusercontent.com/scontain/operator/main/scone-operator-$VERSION.tgz"
+        HELM_CHART="$SCONTAIN_OPERATOR_CHART"
     else
         warning "Using external HELM_CHART=$HELM_CHART"
     fi
 
     if [[ "$LAS_MANIFEST" == "" ]] ; then
-        LAS_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/las.yaml"
+        LAS_MANIFEST=$SCONTAIN_LAS_MANIFEST
     else
         warning "Using external LAS_MANIFEST=$LAS_MANIFEST"
     fi
 
     if [[ "$SGXPLUGIN_MANIFEST" == "" ]] ; then
-        SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/sgxplugin.yaml"
+        SGXPLUGIN_MANIFEST="$SCONTAIN_SGXPLUGIN_MANIFEST"
     else
         warning "Using external SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
     fi
@@ -337,6 +437,7 @@ version_flag="--set-version"
 print_version_flag="--version"
 only_controller_flag="--only-operator"
 no_sgxplugin="--no-sgxplugin"
+verify_sign_key_flag="--verify-image-signatures"
 
 NAMESPACE="$DEFAULT_NAMESPACE"
 repo="$APP_IMAGE_REPO"
@@ -372,9 +473,11 @@ usage ()
   echo ""
   echo "Objectives:"
   echo "  - Checks if the SCONE operator and all its dependencies are available."
-  echo "  - Tries to fix any issues it discovers if flag '--fix' is set."
-  echo "  - Tries to update all components in case flag '--update' is set (even if everything is ok)."
-  echo "  - Creates a namespace for a service if flag --create NAMESPACE is set."
+  echo "  - Tries to fix any issues it discovers if flag '$fix_flag' is set."
+  echo "  - Tries to update all components in case flag '$update_flag' is set (even if everything is ok)."
+  echo "  - Creates a namespace for a service if flag $cr_flag NAMESPACE is set."
+  echo "  - If the $verify_sign_key_flag is provided, or if the Scontain container image repository"
+  echo "    is used, the signatures of the images used are verified."
   echo ""
   echo ""
   echo "Options:"
@@ -416,6 +519,11 @@ usage ()
   echo "                  Set the version of the helm chart"
   echo "    $no_sgxplugin" 
   echo "                  Set this flag in case you do not want to install the SGXPlugin."
+  echo "    $verify_sign_key_flag PUBLIC_KEY_PATH"
+  echo "                  Path to the public key to use for verification of signed images."
+  echo "                  For the verification of signed images in the $SCONTAIN_IMAGE_REPO"
+  echo "                  repository, the public key does not need to be provided, and this"
+  echo "                  option is ignored."
   echo "    $help_flag"
   echo "                  Output this usage information and exit."
   echo ""
@@ -538,6 +646,15 @@ while [[ "$#" -gt 0 ]]; do
       RUN_SGXPLUGIN=0
       shift # past argument
       ;;
+    ${verify_sign_key_flag})
+      export cosign_public_key_file="$2"
+      if [ ! -e "${cosign_public_key_file}" ]; then
+        usage
+        error_exit "Error: Please specify a valid public key file for image signature verfication ('$cosign_public_key_file' does not exist)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
     ${help_flag})
       set_urls
       usage
@@ -549,6 +666,10 @@ while [[ "$#" -gt 0 ]]; do
       ;;
   esac
 done
+
+export SCONTAIN_OPERATOR_CHART="https://raw.githubusercontent.com/scontain/operator/main/scone-operator-$VERSION.tgz"
+export SCONTAIN_SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/sgxplugin.yaml"
+export SCONTAIN_LAS_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/las.yaml"
 
 set_urls
 
@@ -634,11 +755,15 @@ INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.ch
 verbose "Installed version of the operator controller is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
 if [[ $UPDATE == 1 && "$INSTALLED_VERSION" != "$VERSION" ]] ; then
     verbose "  Updating the SCONE Operator: helm upgrade --install scone-operator $HELM_CHART --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE"
-    if [[ $HELM_CHART == https://* ]] ; then
-        curl -fsSL "$HELM_CHART"  -o scone-operator.tgz || error_exit "Failed to download the SCONE Operator helm chart from $HELM_CHART"
+
+    download_file "$HELM_CHART" "scone-operator.tgz"
+
+    if [[ "$HELM_CHART" == "$SCONTAIN_OPERATOR_CHART" || "$cosign_public_key_file" != "" ]]; then
+        verify_image "k8soperators" "$VERSION"
     else
-        cat $HELM_CHART > scone-operator.tgz || error_exit "Failed to read local SCONE Operator HELM chart file $HELM_CHART"
+        warning "Skipping verification of signature of k8soperators image, due to unknown origin of HELM_CHART=$HELM_CHART"
     fi
+
     tar -xzf scone-operator.tgz
     rm scone-operator.tgz
     helm upgrade --install scone-operator ./scone-operator --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE
@@ -653,14 +778,18 @@ if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
     warning "Desired version of SCONE operator is NOT installed ($INSTALLED_VERSION != $VERSION)!"
     if [[ $FIX == 1 ]] ; then
         verbose "  Fixing the SCONE Operator"
-        if [[ $HELM_CHART == https://* ]] ; then
-            curl -fsSL "$HELM_CHART"  -o scone-operator.tgz || error_exit "Failed to download the SCONE Operator helm chart from $HELM_CHART"
+
+        download_file "$HELM_CHART" "scone-operator.tgz"
+
+        if [[ "$HELM_CHART" == "$SCONTAIN_OPERATOR_CHART" || "$cosign_public_key_file" != "" ]]; then
+            verify_image "k8soperators" "$VERSION"
         else
-            cat $HELM_CHART > scone-operator.tgz || error_exit "Failed to read local SCONE Operator helm chart file $HELM_CHART"
+            warning "Skipping verification of signature of k8soperators image, due to unknown origin of HELM_CHART=$HELM_CHART"
         fi
+
         tar -xzf scone-operator.tgz
         rm scone-operator.tgz
-        helm upgrade --install scone-operator $HELM_CHART --namespace $NAMESPACE --version $VERSION  --set image=$PULL_IMAGE
+        helm upgrade --install scone-operator ./scone-operator --namespace $NAMESPACE --version $VERSION  --set image=$PULL_IMAGE
     fi
 fi
 
@@ -736,31 +865,57 @@ fi
 verbose "Checking SGXPlugin"
 
 if [[ $RUN_SGXPLUGIN == 1 ]] ; then 
-    if [[ $SGXPLUGIN_MANIFEST == https://* ]] ; then
-        curl -fsSL "$SGXPLUGIN_MANIFEST"  -o ".sgxplugin-manifest.template" || error_exit "Failed to download the SGXPLUGIN manifest from $SGXPLUGIN_MANIFEST"
-    else
-        cat "$SGXPLUGIN_MANIFEST" > ".sgxplugin-manifest.template" || error_exit "Failed to read local SGXPLUGIN manifest file $SGXPLUGIN_MANIFEST"
-    fi
-    envsubst < ".sgxplugin-manifest.template" > ".sgxplugin-manifest.yaml"
+    download_file "$SGXPLUGIN_MANIFEST" ".sgxplugin-manifest.template"
 
+    envsubst < ".sgxplugin-manifest.template" > ".sgxplugin-manifest.yaml"
 
     if ! kubectl get sgxplugin > /dev/null 2>/dev/null
     then
         if [[ $FIX == 1 ]] ; then
             verbose "  Fixing by creating a sgxplugin resource using manifest $SGXPLUGIN_MANIFEST"
+            if [[ "$SGXPLUGIN_MANIFEST" == "$SCONTAIN_SGXPLUGIN_MANIFEST" || "$cosign_public_key_file" != "" ]]; then
+                verify_image "sgx-plugin" "$VERSION"
+            else
+                warning "Skipping verification of signature of sgxplugin image, due to unknown origin of SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
+            fi
             wait_for_cmd_success "kubectl apply -f .sgxplugin-manifest.yaml"
         fi
     else
-        verbose "Custom Resource 'sgxplugin' does already exists"
+        verbose "Custom Resource 'sgxplugin' does already exists. Checking name."
+
+        PLUGIN_NAME=$(kubectl get sgxplugin -A -o json | jq '.items[0].metadata.name' | tr -d '"')
+        if [[ "$PLUGIN_NAME" != "sgxplugin" && "$PLUGIN_NAME" != "" &&  "$PLUGIN_NAME" != "null" ]] ; then 
+            warning "Desired version of SCONE SGXPlugin has the wrong name ($PLUGIN_NAME) - deleting it!"
+            if [[ $FIX == 1 ]] ; then
+                kubectl delete sgxplugin "$PLUGIN_NAME" || error_exit "Failed to delete non-standard sgxplugin $PLUGIN_NAME - try to rerun this script"
+            fi
+        fi
+
         INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.chart | startswith("sgxdevplugin-"))' | jq '(.chart |  ltrimstr("sgxdevplugin-"))' | tr -d '"')
 
         verbose "Installed version of the SGXPlugin is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
+
+        verbose "Checking again if Custom Resource Definition 'sgxplugins' exists"
+        until kubectl get sgxplugin  > /dev/null 2>/dev/null
+        do
+            warning "Custom Resource Definition 'sgxplugin' does not yet exist. Waiting a little for the CRD to get ready."
+            sleep 5
+        done
 
         if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
             warning "Desired version of SCONE SGXPlugin is NOT installed!"
             if [[ $FIX == 1 ]] ; then
                 verbose "  Fixing the SGXPlugin using $SGXPLUGIN_MANIFEST"
-                kubectl apply -f .sgxplugin-manifest.yaml || error_exit "Cannot update sgxplugin? Please delete sgxplugin and run again!"
+                if [[ "$SGXPLUGIN_MANIFEST" == "$SCONTAIN_SGXPLUGIN_MANIFEST" || "$cosign_public_key_file" != "" ]]; then
+                    verify_image "sgx-plugin" "$VERSION"
+                else
+                    warning "Skipping verification of signature of sgxplugin image, due to unknown origin of SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
+                fi
+                until kubectl apply -f .sgxplugin-manifest.yaml 
+                do
+                    warning "Cannot update sgxplugin: maybe operator is not yet updated - hence, retrying soon"
+                    sleep 5
+                done
             fi
         fi
     fi
@@ -774,18 +929,35 @@ then
     if [[ $FIX == 1 ]] ; then
         verbose "  Fixing by creating a LAS resource using manifest '$LAS_MANIFEST'"
 
-        if [[ $LAS_MANIFEST == https://* ]] ; then
-        curl -fsSL "$LAS_MANIFEST"  -o ".las-manifest.template" || error_exit "Failed to download the LAS manifest from $LAS_MANIFEST"
-        else
-        cat "$LAS_MANIFEST" > ".las-manifest.template" || error_exit "Failed to read local LAS manifest file $LAS_MANIFEST"
-        fi
+        download_file "$LAS_MANIFEST" ".las-manifest.template"
 
         envsubst < ".las-manifest.template" > ".las-manifest.yaml"
 
+        if  [[ "$LAS_MANIFEST" == "$SCONTAIN_LAS_MANIFEST" || "$cosign_public_key_file" != "" ]]; then
+            verify_image "las" "$VERSION"
+        else
+            warning "Skipping verification of signature of las image, due to unknown origin of LAS_MANIFEST=$LAS_MANIFEST"
+        fi
         kubectl apply -f ".las-manifest.yaml"
     fi
 else
     verbose "Custom Resource 'las' already exists"
+    LAS_IMAGE=$(kubectl get las las -n scone-system -o json | jq '.spec.image' | tr -d '"')
+    EXPECTED_IMAGE="${IMAGE_REPO}/${IMAGE_PREFIX}las:$VERSION"
+
+    verbose "LAS uses image $LAS_IMAGE and we expect image $EXPECTED_IMAGE"
+    if [[ "$EXPECTED_IMAGE" != "$LAS_IMAGE" ]] ; then
+        download_file "$LAS_MANIFEST" ".las-manifest.template"
+
+        envsubst < ".las-manifest.template" > ".las-manifest.yaml"
+
+        if  [[ "$LAS_MANIFEST" == "$SCONTAIN_LAS_MANIFEST" || "$cosign_public_key_file" != "" ]]; then
+            verify_image "las" "$VERSION"
+        else
+            warning "Skipping verification of signature of las image, due to unknown origin of LAS_MANIFEST=$LAS_MANIFEST"
+        fi
+        kubectl apply -f ".las-manifest.yaml"
+    fi
 fi
 
 
