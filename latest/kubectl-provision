@@ -26,7 +26,7 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.10"
+export K_PROVISION_VERSION="5.8.0-rc.11"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_ISVPRODID="41316"
@@ -79,6 +79,80 @@ EOF
 
 
 #
+# create a file with the public key of scontain gpg signer key
+#
+
+function create_gpg_verification_key() {
+    local tmp_gpg
+
+    export gpg_public_key_file="$(mktemp)-pub.gpg"
+    tmp_gpg="${gpg_public_key_file}.base64"
+
+    cat > $tmp_gpg <<EOF
+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
+EOF
+    cat "$tmp_gpg" | base64 -d > $gpg_public_key_file
+}
+
+#
 # verify that a container image was properly signed by Scontain
 #
 
@@ -95,7 +169,7 @@ function verify_image() {
     fi
 
     verbose "Verifying the signature of image '$image_name'"
-    docker pull "$image_name"
+    docker pull "$image_name" >/dev/null
     if [[ "$cosign_public_key_file" == "" ]]; then
         create_cosign_verification_key
     fi
@@ -158,8 +232,13 @@ SIGNER="5BCAD31DCC8D5D722B7B7ABD2EBE04E7CC816D32"
 
 function verify_file() {
     file=$1
-    gpg  --verify --status-fd=1 --verify "$file.asc" "$file" 2> /dev/null | grep -e "VALIDSIG $SIGNER" >/dev/null
+
+    if [[ "$gpg_public_key_file" == "" ]]; then
+        create_gpg_verification_key
+    fi
+    LC_ALL=en_US.UTF-8 gpg --no-default-keyring --keyring $gpg_public_key_file --verify --status-fd=1 "$file.asc" "$file" 2> /dev/null | grep -e " VALIDSIG $SIGNER" >/dev/null
 }
+
 
 # download/copy files
 #
@@ -246,6 +325,9 @@ function cas_pod_port_forward() {
 #
 
 function cas_svc_port_forward() {
+    if [[ $SVCNAME == "" ]] ; then
+      error_exit "SVCNAME is not defined - internal error"
+    fi
     cas_port_forward "service" $SVCNAME
 }
 
@@ -263,7 +345,7 @@ function check_port_forward() {
     PF=$(ps axx | grep port-forward | wc -l | tr -d '[:space:]')
     if [ $PF -ge  2 ] ; then
         error_exit "It looks like port-forwarding already running (please check with ps axx | grep port-forward ) - this might prevent us or the other program from running. Bailing!"
-fi
+    fi
 }
 
 # a precheck to ensure that all directories exist (since we might need sudo to create)
@@ -359,7 +441,8 @@ function session_hash {
 
     #  export SGX_TOLERATIONS="-G -C -S --only_for_testing-ignore-signer --only_for_testing-trust-any --only_for_testing-debug"
 
-    docker run --rm --platform linux/amd64 \
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    docker run --rm --platform linux/amd64  \
         --add-host=host.docker.internal:host-gateway \
         -v "$TARGET_DIR"/identity:/identity \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
@@ -386,7 +469,8 @@ function get_policy_and_its_hash() {
     relative_policy_target_dir=$2
     policy_target_file_name=$3
 
-    docker run --rm --platform linux/amd64 \
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    docker run --rm --platform linux/amd64   \
         --add-host=host.docker.internal:host-gateway \
         -v "$TARGET_DIR"/identity:/identity \
         -v "$TARGET_DIR"/"$relative_policy_target_dir":/$relative_policy_target_dir \
@@ -573,6 +657,7 @@ function upgrade_vault() {
 
     verbose "Upgrading policy $policy_name in CAS $NAME in namespace $NAMESPACE (using manifest $manifest_file)"
 
+    docker pull ${SCONECLI_IMAGE} >/dev/null
     docker run --rm --platform linux/amd64 \
         --add-host=host.docker.internal:host-gateway \
         -v "$TARGET_DIR"/identity:/identity \
@@ -736,7 +821,8 @@ function create_vault_policy {
 
     export SCONE_ESCAPE_HACK="\$SCONE"
 
-    docker run --rm --platform linux/amd64 --pull always \
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    docker run --rm --platform linux/amd64  \
         --add-host=host.docker.internal:host-gateway \
         -v "$TARGET_DIR"/identity:/identity \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
@@ -767,10 +853,11 @@ function check_if_provisioned {
         return 1
     fi
 
+    SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
     check_port_forward
     cas_svc_port_forward
-
-    RESULT=$(docker run --rm --platform linux/amd64 --pull always \
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    RESULT=$(docker run --rm --platform linux/amd64 \
         --add-host=host.docker.internal:host-gateway \
         -v "$TARGET_DIR"/identity:/identity \
         -v "$TARGET_DIR"/owner-config:/owner-config \
@@ -808,10 +895,12 @@ function print_cas_keys {
         exit 1
     fi
 
+    SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
     check_port_forward
     cas_svc_port_forward
 
-    docker run --rm --platform linux/amd64 --pull always \
+    docker pull ${SCONECLI_IMAGE} > /dev/null
+    docker run --rm --platform linux/amd64  \
         --add-host=host.docker.internal:host-gateway \
         -v "$TARGET_DIR"/identity:/identity \
         -v "$TARGET_DIR"/owner-config:/owner-config \
@@ -846,7 +935,8 @@ function print_vault_keys {
 
     verbose "retrieveing public keys .. might take a few seconds"
 
-    docker run --rm --platform linux/amd64 --pull always \
+    docker pull ${SCONECLI_IMAGE} > /dev/null
+    docker run --rm --platform linux/amd64 \
           --add-host=host.docker.internal:host-gateway \
           -v "$TARGET_DIR"/cas-certs:/cas-certs \
           -v "$TARGET_DIR"/vault-certs:/vault-certs \
@@ -1551,6 +1641,13 @@ then
         error_exit "State of  '$NAME' in namespace '$NAMESPACE' is '$STATE': Expected HEALTHY state. Exiting!"
     fi
 
+    export SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+    verbose "CAS $NAME has service name $SVCNAME"
+
+    if [[ "$SVCNAME" == "" ]] ; then
+      error_exit "Failed to determine the service name of CAS $NAME"
+    fi
+
     verbose "Checking if CAS needs upgrading"
 
 
@@ -1586,8 +1683,8 @@ then
 
         verbose "Reading Session $POLICY_NAME from CAS $NAME in namespace $NAMESPACE"
 
-
-        docker run --rm --platform linux/amd64 \
+        docker pull ${SCONECLI_IMAGE} >/dev/null
+        docker run --rm --platform linux/amd64  \
             --add-host=host.docker.internal:host-gateway \
             -v "$TARGET_DIR"/identity:/identity \
             -e SCONE_CLI_CONFIG="/identity/config.json" \
@@ -1812,7 +1909,7 @@ verbose "Found POD '$POD'"
 
 verbose "determining the CAS address"
 
-SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+export SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
 export SCONE_CAS_ADDR=$(kubectl get svc --namespace "$NAMESPACE" "$SVCNAME" --template "{{ .spec.clusterIP }}")
 
 verbose " CAS address = $SCONE_CAS_ADDR (SVC name = $SVCNAME)"
@@ -1936,7 +2033,8 @@ EOF
         check_port_forward
         cas_svc_port_forward
 
-        docker run --platform linux/amd64 --pull always \
+        docker pull ${SCONECLI_IMAGE} >/dev/null
+        docker run --platform linux/amd64 \
             --add-host=host.docker.internal:host-gateway \
             -v "$TARGET_DIR/"/identity:/identity \
             -v "$TARGET_DIR"/owner-config:/owner-config \
@@ -1978,8 +2076,8 @@ access_policy:
     - CREATOR
 EOF
 
-
-        docker run --rm --platform linux/amd64 --pull always \
+        docker pull ${SCONECLI_IMAGE} >/dev/null
+        docker run --rm --platform linux/amd64 \
             --add-host=host.docker.internal:host-gateway \
             -v "$TARGET_DIR"/identity:/identity \
             -v "$TARGET_DIR"/owner-config:/owner-config \
@@ -2077,7 +2175,8 @@ if [ "$SVC" == "vault" ] ; then
 
     enable_cas_port_forwarding_with_retry
 
-    docker run --rm --platform linux/amd64 --pull always \
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    docker run --rm --platform linux/amd64 \
         --add-host=host.docker.internal:host-gateway \
         -v "$TARGET_DIR"/identity:/identity \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
