@@ -42,7 +42,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.11"
+export K_PROVISION_VERSION="5.8.0-rc.12"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -307,7 +307,7 @@ function verify_image() {
     if [[ "$cosign_public_key_file" == "" ]]; then
         create_cosign_verification_key
     fi
-    cosign verify --key "$cosign_public_key_file" "$image" >/dev/null 2> /dev/null || error_exit "Failed to verify signature of image '$image'! Exiting!"
+    cosign verify --key "$cosign_public_key_file" "$image" >/dev/null 2> /dev/null || error_exit "Failed to verify signature of image '$image'! Exiting! Please check that 'cosign version' shows a git version >= 2.0.0."
     verbose "  verification was successful"
 }
 
