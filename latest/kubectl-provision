@@ -26,7 +26,7 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.14"
+export K_PROVISION_VERSION="5.8.0-rc.15"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -638,7 +638,7 @@ function session_hash {
     docker pull ${SCONECLI_IMAGE} >/dev/null
     docker run --rm --platform linux/amd64  \
         --add-host=host.docker.internal:host-gateway \
-        -v "$TARGET_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
         -e SCONE_CAS_ADDR="$SCONE_CAS_ADDR" \
         -e SCONE_NO_TIME_THREAD=1 \
@@ -668,8 +668,8 @@ function get_policy_and_its_hash() {
     docker pull ${SCONECLI_IMAGE} >/dev/null
     docker run --rm --platform linux/amd64   \
         --add-host=host.docker.internal:host-gateway \
-        -v "$TARGET_DIR"/identity:/identity \
-        -v "$TARGET_DIR"/"$relative_policy_target_dir":/$relative_policy_target_dir \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/"$relative_policy_target_dir":/$relative_policy_target_dir \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
         -e POLICY_NAME="$policy_name" \
       	-e OUT_FILE="$policy_target_file_name" \
@@ -858,8 +858,8 @@ function upgrade_vault() {
     docker pull ${SCONECLI_IMAGE} >/dev/null
     docker run --rm --platform linux/amd64 \
         --add-host=host.docker.internal:host-gateway \
-        -v "$TARGET_DIR"/identity:/identity \
-        -v "$TARGET_DIR"/vault_policies:/vault_policies \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/vault_policies:/vault_policies \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
         -e POLICY="$container_manifest_file" \
         -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
@@ -1025,7 +1025,7 @@ function create_vault_policy {
     docker pull ${SCONECLI_IMAGE} >/dev/null
     docker run --rm --platform linux/amd64  \
         --add-host=host.docker.internal:host-gateway \
-        -v "$TARGET_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
         -e OWNER_ID="$OWNER_ID" \
         -e SCONE_CAS_ADDR="host.docker.internal" \
@@ -1034,7 +1034,7 @@ function create_vault_policy {
         -e SCONE="$SCONE_ESCAPE_HACK" \
         -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
         -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
-        -v "$TARGET_DIR"/policies:/policies \
+        -v "$TARGET_MOUNT_DIR"/policies:/policies \
         -e POLICY_FILE="$path_in_container" \
         -e SCONE_NO_TIME_THREAD=1 \
         -e NAME="$NAME" \
@@ -1061,8 +1061,8 @@ function check_if_provisioned {
     docker pull ${SCONECLI_IMAGE} >/dev/null
     RESULT=$(docker run --rm --platform linux/amd64 \
         --add-host=host.docker.internal:host-gateway \
-        -v "$TARGET_DIR"/identity:/identity \
-        -v "$TARGET_DIR"/owner-config:/owner-config \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
         -e SCONE_CAS_ADDR="host.docker.internal" \
         -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
@@ -1105,8 +1105,8 @@ function print_cas_keys {
     docker pull ${SCONECLI_IMAGE} > /dev/null
     docker run --rm --platform linux/amd64  \
         --add-host=host.docker.internal:host-gateway \
-        -v "$TARGET_DIR"/identity:/identity \
-        -v "$TARGET_DIR"/owner-config:/owner-config \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
         -e SCONE_CAS_ADDR="host.docker.internal" \
         -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
@@ -1141,10 +1141,10 @@ function print_vault_keys {
     docker pull ${SCONECLI_IMAGE} > /dev/null
     docker run --rm --platform linux/amd64 \
           --add-host=host.docker.internal:host-gateway \
-          -v "$TARGET_DIR"/cas-certs:/cas-certs \
-          -v "$TARGET_DIR"/vault-certs:/vault-certs \
-          -v "$TARGET_DIR"/identity:/identity \
-          -v "$TARGET_DIR"/owner-config:/owner-config \
+          -v "$TARGET_MOUNT_DIR"/cas-certs:/cas-certs \
+          -v "$TARGET_MOUNT_DIR"/vault-certs:/vault-certs \
+          -v "$TARGET_MOUNT_DIR"/identity:/identity \
+          -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
           -e SCONE_CLI_CONFIG="/identity/config.json" \
           -e SCONE_CAS_ADDR="host.docker.internal" \
           -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
@@ -1175,6 +1175,120 @@ function print_vault_keys {
 # NOTE: verbose will only show up if you execute with "V=1 ./kubectl-kubectl"
 source "$CONFIG_FILE" 2>/dev/null || verbose "Note: could not load config file \"$CONFIG_FILE\" - Ignoring."
 
+
+function post_provisioning() {
+    export SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+    check_port_forward
+    cas_svc_port_forward
+
+    export POLICY_NAME="$NAME-$NAMESPACE-backup-controller"
+    export SCONE_CLI_MRENCLAVE="$(docker run --platform linux/amd64 --pull always --rm --entrypoint scone -e SCONE_HASH=1 "$BACKUP_CONTROLLER_IMAGE" cas | tr -d '\r')"
+
+    post_provision_attest
+    upload_post_provisioning_sessions
+    enable_post_provisioning_features
+}
+
+function post_provision_attest() {
+    docker run --rm --platform linux/amd64  \
+        --add-host=host.docker.internal:host-gateway \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -e SCONE_CLI_CONFIG="/identity/config.json" \
+        -e SCONE_CAS_ADDR="host.docker.internal" \
+        -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+        -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+        -e SCONE_NO_TIME_THREAD=1 \
+        -e POLICY_NAME="$POLICY_NAME" \
+        -e SCONE_MODE="sim" \
+        -e NAME="$NAME" \
+        ${SCONECLI_IMAGE} \
+        sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default $SCONE_CAS_ADDR  ;' 
+}
+
+
+function enable_post_provisioning_features() {
+    # todo: next version - use encrypted policy and upload encrypted policy
+
+    kubectl get cas $NAME  --namespace "$NAMESPACE"
+
+    if [[ $NO_BACKUP -eq 1 ]]; then
+        patch_file_url=$CAS_PATCH_PROBES_JSON_URL
+    else
+        patch_file_url=$CAS_PATCH_PROBES_AND_BACKUP_JSON_URL
+    fi
+    patch_template_file="$TARGET_DIR/owner-config/cas-$NAMESPACE-$NAME-$VERSION-patch.json.template"
+    patch_file="$TARGET_DIR/owner-config/cas-$NAMESPACE-$NAME-$VERSION-patch.json"
+    verbose "Patching CAS CR $NAME in namespace $NAMESPACE (template patch file: $patch_file_url, final patch file: $patch_file)"
+    download_file $patch_file_url $patch_template_file
+    SCONE="\$SCONE" envsubst < "$patch_template_file" > "$patch_file"
+    kubectl patch cas $NAME --namespace $NAMESPACE --type='json' --patch-file=$patch_file
+
+    export cas_manifest="$TARGET_DIR/owner-config/cas-${NAMESPACE}-${NAME}-${VERSION}-manifest.yaml"
+    verbose "Creating manifest '$cas_manifest' for setting up CAS"
+    kubectl get cas $NAME -n $NAMESPACE -o yaml > $cas_manifest
+
+    if [[ $do_wait_for_healthy == 1 ]]; then
+        wait_for_resource_phase "cas" "$NAME" "$NAMESPACE" "HEALTHY"
+    fi
+
+    verbose "The manifest of CAS '$NAME' in namespace '$NAMESPACE' is stored in $cas_manifest"
+    verbose "  - You can modify the metadata and spec fields of the manifest and apply the changes with 'kubectl apply -f \"$cas_manifest\""
+    verbose "The owner identity of CAS '$NAME' in namespace '$NAMESPACE' is stored in directory \"$TARGET_DIR/identity\""
+
+    verbose "Done. Shutting down tunnel"
+    kill $SERVICE_PID
+}
+
+function upload_post_provisioning_sessions() {
+    owner_id_file=$post_provisioning_owner_config
+    if [[ "$owner_id_file" == "" ]]; then
+        owner_id_file="$TARGET_DIR/identity/config.json"
+    fi
+    sed 's/^/          /' "$owner_id_file" >  "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json"
+    export OWNER_IDENTITY=$(sed "s/host.docker.internal/$SVCNAME.$NAMESPACE/" "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json")
+    echo "$OWNER_IDENTITY" > "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json"
+
+    BACKUP_POLICY_TEMPLATE="$TARGET_DIR/identity/backup-controller-session-$POLICY_NAME.yaml.template"
+    BACKUP_POLICY="$TARGET_DIR/identity/backup-controller-session-$POLICY_NAME.yaml"
+    set_platform_ids
+    download_file "$CAS_BACKUP_POLICY_URL" "$BACKUP_POLICY_TEMPLATE"
+
+    SCONE="\$SCONE" envsubst < "$BACKUP_POLICY_TEMPLATE" > "$BACKUP_POLICY"
+
+    verbose "Creating Backup Policy $POLICY_NAME for CAS $NAME in namespace $NAMESPACE (see file $BACKUP_POLICY)"
+
+    PROVISIONED_POLICY="$TARGET_DIR/identity/provisioned.yaml"
+    cat > "$PROVISIONED_POLICY" <<EOF
+name: provisioned
+version: "0.3.10"
+predecessor:
+
+access_policy:
+  read:
+    - ANY
+  update:
+    - CREATOR
+  create_sessions:
+    - CREATOR
+EOF
+
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    docker run --rm --platform linux/amd64 \
+        --add-host=host.docker.internal:host-gateway \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
+        -e SCONE_CLI_CONFIG="/identity/config.json" \
+        -e SCONE_CAS_ADDR="host.docker.internal" \
+        -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
+        -e POLICY_NAME="$POLICY_NAME" \
+        -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+        -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+        -e SCONE_NO_TIME_THREAD=1 \
+        -e NAME="$NAME" \
+        ${SCONECLI_IMAGE} \
+        sh -c "export SCONE_MODE=sim; set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal ; scone session create /identity/backup-controller-session-$POLICY_NAME.yaml ; echo 'Exit:' $? ; scone session create /identity/provisioned.yaml ; echo Exit: '$?' ; echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}' ; scone cas show-identification -c ; echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}' ; scone cas show-identification -s ; echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'; scone cas show-identification --session-encryption-key"
+
+}
 
 #
 # enforce_cas_is_healthy error_exits if the cas 'name' ($1) in namespace 'namespace' ($2) is not healthy
@@ -1270,6 +1384,8 @@ cas_recovery="--cas-database-recovery"
 local_backup="--local-backup"
 upgrade_flag="--upgrade"
 no_provisioning="--preprovision-only"
+post_provisioning_flag="--postprovision-only"
+post_provisioning_owner_config_flag="--postprovision-owner-config"
 
 unset SNAPSHOT
 verify_sign_key_flag="--verify-image-signatures"
@@ -1294,8 +1410,10 @@ do_recovery=0
 do_backup=0;
 do_cas_upgrade=0;
 do_vault_upgrade=0
-do_wait_for_healthy=0
+export do_wait_for_healthy=0
 do_preprovision=0
+do_postprovision=0
+post_provisioning_owner_config=""
 
 export OWNER_FILE=""
 export VAULT_CAS="cas"
@@ -1376,8 +1494,11 @@ function set_defaults() {
     if [[ "$VAULT_DEMO_CLIENT_POLICY_URL" == "" ]] ; then
         export VAULT_DEMO_CLIENT_POLICY_URL="$MANIFESTS_URL/$VERSION/vault-demo-client-policy.yaml"
     fi
-    if [[ "$CAS_MANIFEST_URL" == "" ]] ; then
-        export CAS_MANIFEST_URL="$MANIFESTS_URL/$VERSION/cas.yaml"
+    if [[ "$CAS_PATCH_PROBES_AND_BACKUP_JSON_URL" == "" ]] ; then
+        export CAS_PATCH_PROBES_AND_BACKUP_JSON_URL="$MANIFESTS_URL/$VERSION/cas_patch_probes_and_backup.json"
+    fi
+    if [[ "$CAS_PATCH_PROBES_JSON_URL" == "" ]] ; then
+        export CAS_PATCH_PROBES_JSON_URL="$MANIFESTS_URL/$VERSION/cas_patch_probes.json"
     fi
     if [[ "$CAS_PROVISIONING_URL" == "" ]] ; then
         export CAS_PROVISIONING_URL="$MANIFESTS_URL/$VERSION/cas_provisioning.yaml"
@@ -1389,6 +1510,12 @@ function set_defaults() {
         export VAULT_IMAGE_MRENCLAVES_MANIFEST_URL="$MANIFESTS_URL/$VERSION/vault-image-mrenclaves.yaml"
     elif [[ "$VAULT_IMAGE_MRENCLAVES_MANIFEST_URL" == "" ]]; then
         export VAULT_IMAGE_MRENCLAVES_MANIFEST_URL="$MANIFESTS_URL/$vault_upgrade_version/vault-image-mrenclaves.yaml"
+    fi
+
+    if  [[ "$TARGET_MOUNT_DIR" == "" ]] ; then
+        TARGET_MOUNT_DIR="$TARGET_DIR"
+    else
+        warning "Using external TARGET_MOUNT_DIR=\"$TARGET_MOUNT_DIR\""
     fi
 }
 
@@ -1425,6 +1552,9 @@ usage ()
     echo "                  providing an owner config for LoadBalancer services."
     echo "    $target_flag"
     echo "                  Specify target directory for generated manifests and owner IDs. Default path=\"$TARGET_DIR\"."
+    echo "                  When running inside of a container and you want to mount the $TARGET_DIR"
+    echo "                  on an external directory, define environment variable TARGET_MOUNT_DIR."
+    echo "                  the TARGET_DIR is then stored on TARGET_MOUNT_DIR in the host filesystem."
     echo "    $no_backup_flag"
     echo "                  Create and provision a cas with the backup-controller disabled."
     echo "    $verbose_short_flag | $verbose_flag"
@@ -1440,10 +1570,16 @@ usage ()
     echo "                  Url of an image registry containing the images to be used"
     echo "                  Default: $IMAGE_REPO"
     echo "    $file_flag | $file_short_flag <FILE>"
-    echo "                  file or url	that contains the manifest to apply"
-    echo "                  - default Vault manifest is $VAULT_MANIFEST_URL"
-    echo "                  - default CAS manifest is $CAS_MANIFEST_URL"
-    echo "                  - default Vault verifier manifest is $VAULT_VERIFIER_MANIFEST_URL"
+    echo "                  file or url that contains the manifest/policy/patch to apply"
+    echo "                  - default Vault manifest:"
+    echo "                     - $VAULT_MANIFEST_URL"
+    echo "                  - default Vault verifier manifest:"
+    echo "                     - $VAULT_VERIFIER_MANIFEST_URL"
+    echo "                  - default Vault client policy:"
+    echo "                     - $VAULT_DEMO_CLIENT_POLICY_URL"
+    echo "                  - default CAS patch applied to a provisioned CAS:"
+    echo "                     - $CAS_PATCH_PROBES_AND_BACKUP_JSON_URL, or"
+    echo "                     - $CAS_PATCH_PROBES_JSON_URL when $no_backup_flag is provided"
     echo "    $is_provisioned_flag"
     echo "                  Checks if CAS is already provisioned and exists: Exits with an error in case it was not yet provisioned."
     echo "    $create_policy_flag"
@@ -1486,6 +1622,15 @@ usage ()
     echo "                  Wait for SVC to become healthy before returning."
     echo "    $no_provisioning"
     echo "                  It starts the CAS to a point at which one can inject a database key."
+    echo "    $post_provisioning_flag"
+    echo "                  Perform the post-provisioning steps on the CAS:"
+    echo "                  -  mark the cas as provisioned, and"
+    echo "                  -  enable startup probe, liveness probe, and backup-controller."
+    echo "                  NOTE: The use of this flag assumes the cas has already been provisioned (although"
+    echo "                  it has not yet been marked as provisioned)."
+    echo "    $post_provisioning_owner_config_flag <OWNER-CONFIG>"
+    echo "                  Perform the post-provisioning steps on the CAS with the provided owner-config file."
+    echo "                  Requires $post_provisioning_flag"
     echo "    $help_flag"
     echo "                  Output this usage information and exit."
     echo "    $print_version_flag"
@@ -1499,13 +1644,15 @@ usage ()
     echo "  - NAMESPACE=\"$NAMESPACE\""
     echo "  - DCAP_KEY=\"$DCAP_KEY\""
     echo "  - TARGET_DIR=\"$TARGET_DIR\""
+    echo "  - TARGET_MOUNT_DIR=\"$TARGET_MOUNT_DIR\""
     echo "  - VAULT_MANIFEST_URL=\"$VAULT_MANIFEST_URL\" # Vault Manifest"
     echo "  - VAULT_VERIFIER_MANIFEST_URL=\"$VAULT_VERIFIER_MANIFEST_URL\" # Vault Verifier Manifest"
     echo "  - VAULT_POLICY_URL=\"$VAULT_POLICY_URL\" # CAS policy for Vault"
     echo "  - VAULT_VERIFY_POLICY_URL=\"$VAULT_VERIFY_POLICY_URL\" # CAS verification policy for Vault"
     echo "  - VAULT_DEMO_CLIENT_POLICY_URL=\"$VAULT_DEMO_CLIENT_POLICY_URL\" # demo policy for a Vault client"
     echo "  - VAULT_IMAGE_MRENCLAVES_MANIFEST_URL=\"$VAULT_IMAGE_MRENCLAVES_MANIFEST_URL\" # template for upgrading vault"
-    echo "  - CAS_MANIFEST_URL=\"$CAS_MANIFEST_URL\""
+    echo "  - CAS_PATCH_PROBES_AND_BACKUP_JSON_URL=\"$CAS_PATCH_PROBES_AND_BACKUP_JSON_URL\""
+    echo "  - CAS_PATCH_PROBES_JSON_URL=\"$CAS_PATCH_PROBES_JSON_URL\""
     echo "  - CAS_PROVISIONING_URL=\"$CAS_PROVISIONING_URL\""
     echo "  - CAS_BACKUP_POLICY_URL=\"$CAS_BACKUP_POLICY_URL\""
     echo "  - SGX_TOLERATIONS=\"$SGX_TOLERATIONS\""
@@ -1567,11 +1714,12 @@ while [[ "$#" -gt 0 ]]; do
         $file_flag | $file_short_flag)
             export VAULT_MANIFEST_URL="$2"
             export VAULT_VERIFIER_MANIFEST_URL="$2"
-            export CAS_MANIFEST_URL="$2"
             export POLICY="$2"
+            export CAS_PATCH_PROBES_AND_BACKUP_JSON_URL="$2"
+            export CAS_PATCH_PROBES_JSON_URL="$2"
             if [ ! -n "${VAULT_MANIFEST_URL}" ]; then
                 usage
-                error_exit "Error: Please specify a manifest file ('$VAULT_MANIFEST_URL' is invalid)."
+                error_exit "Error: Please specify a file ('$VAULT_MANIFEST_URL' is invalid)."
             fi
             shift # past argument
             shift || true # past value
@@ -1718,6 +1866,19 @@ while [[ "$#" -gt 0 ]]; do
             do_preprovision=1;
             shift || true # past value
             ;;
+        $post_provisioning_flag)
+            do_postprovision=1;
+            shift || true # past value
+            ;;
+        $post_provisioning_owner_config_flag)
+            post_provisioning_owner_config=$2;
+            if [ ! -e "${post_provisioning_owner_config}" ]; then
+                usage
+                error_exit "Error: Please specify a valid owner-config file ('$post_provisioning_owner_config' does not exist)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
         $help_flag)
             do_help=1
             shift
@@ -1746,6 +1907,8 @@ if [ $do_help != 0 ] ; then
     exit 0
 fi
 
+
+
 if [[ "${SVC}" != "cas" && "${SVC}" != "vault"  ]]; then
     usage
     error_exit "Error: Please specify a valid SVC ('$SVC' is invalid)."
@@ -1772,6 +1935,13 @@ if [[ "${SVC}" == "vault" ]]; then
     then
         error_exit "Namespace '$VAULT_NAMESPACE' cannot be retrieved. Either it does not exist or the cluster is not reachable."
     fi
+    if [[ $do_postprovision == 1 ]] ; then
+        error_exit "$post_provisioning_flag requires SVC cas"
+    fi
+fi
+
+if [[ $do_postprovision == 0 && "$post_provisioning_owner_config" != "" ]] ; then
+    error_exit "The $post_provisioning_owner_config_flag flag requires the $post_provisioning_flag"
 fi
 
 if ! kubectl get namespace "$NAMESPACE" > /dev/null 2>/dev/null
@@ -1954,7 +2124,7 @@ then
         docker pull ${SCONECLI_IMAGE} >/dev/null
         docker run --rm --platform linux/amd64  \
             --add-host=host.docker.internal:host-gateway \
-            -v "$TARGET_DIR"/identity:/identity \
+            -v "$TARGET_MOUNT_DIR"/identity:/identity \
             -e SCONE_CLI_CONFIG="/identity/config.json" \
             -e SCONE_CAS_ADDR="$SCONE_CAS_ADDR" \
             -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
@@ -2103,6 +2273,12 @@ export IMAGE=""
 EXISTS=1  JSON=$(kubectl get cas "$NAME" --namespace "$NAMESPACE" -o json 2>/dev/null) || EXISTS=0
 
 if [[ $EXISTS == 1 ]] ; then
+    if [[ $do_postprovision == 1 ]] ; then
+        verbose "We only perform the post-provisioning steps."
+        post_provisioning
+        exit 0
+    fi
+
     if [[ $do_recovery == 1 ]]; then
         error_exit "The target CAS of a recovery must not exists. Please specify a diffferent CAS name and namespace to use for the recovery."
     fi
@@ -2141,11 +2317,15 @@ if [[ $EXISTS == 1 ]] ; then
     fi
 else
 
+    if [[ $do_postprovision == 1 ]] ; then
+        error_exit "The $post_provisioning_flag flag requires the CAS to exist. No CAS $NAME found in namespace $NAMESPACE"
+    fi
+
     IMAGE="$CAS_IMAGE"
     if [[ $do_recovery == 1 ]] ; then
         export IMAGE="$CAS_RECOVERY_IMAGE"
         EXPECTED_IMAGE="$IMAGE"
-        verbose "- Recovering CAS using IMAGE $IAMGE"
+        verbose "- Recovering CAS using IMAGE $IMAGE"
     fi
     if [[ "$image_overwrite" != "" ]]
     then
@@ -2178,7 +2358,7 @@ if [[ $EXISTS == 0 ]] ; then
 
 
     verbose "Creating/Applying CAS CR for Provisioning"
-    kubectl apply -f "$manifest" || error_exit "Creation of CAS Manifest '$manifest' failed."
+    kubectl apply -f "$manifest" 2> /dev/null 1> /dev/null || error_exit "Creation of CAS Manifest '$manifest' failed."
 else
     verbose "CAS '$NAME' in namespace '$NAMESPACE' already exists - trying to provision it"
 fi
@@ -2229,7 +2409,8 @@ if [[ $EXISTS == 0 || "${SVC}" == "cas" ]] ; then
             fi
         done
 
-        export CAS_KEY_HASH=$(kubectl logs "$POD"  --namespace "$NAMESPACE" | grep "CAS key hash" | awk '{ print $NF } ')
+        CAS_KEY_HASH=$(kubectl logs "$POD"  --namespace "$NAMESPACE" | grep "CAS key hash" | awk '{ print $NF } ')
+        export CAS_KEY_HASH=$(echo "$CAS_KEY_HASH" | tail -1 )
 
         RETRY=50
         until kubectl logs $POD --namespace "$NAMESPACE" | grep "CAS provisioning token"  > /dev/stderr
@@ -2313,7 +2494,7 @@ if [[ $EXISTS == 0 || "${SVC}" == "cas" ]] ; then
 enclave_reconnect_timeout = "24h"
 [api_identity]
 common_name = "$SVCNAME"
-alt_names = ["$POD",  "$POD.$NAMESPACE.svc.cluster.local", "$POD.default",  "$SVCNAME.$NAMESPACE.svc.cluster.local", "$SVCNAME.default", "localhost", "$SCONE_CAS_ADDR"]
+alt_names = ["$POD",  "$POD.$NAMESPACE.svc.cluster.local", "$POD.default",  "$SVCNAME.$NAMESPACE.svc.cluster.local", "$SVCNAME.default", "localhost", "$SCONE_CAS_ADDR", "cas-instance", "host.docker.internal" ]
 
 [dcap]
 subscription_key = "$DCAP_KEY"
@@ -2332,8 +2513,8 @@ EOF
         docker pull ${SCONECLI_IMAGE} >/dev/null
         docker run --platform linux/amd64 \
             --add-host=host.docker.internal:host-gateway \
-            -v "$TARGET_DIR/"/identity:/identity \
-            -v "$TARGET_DIR"/owner-config:/owner-config \
+            -v "$TARGET_MOUNT_DIR"/identity:/identity \
+            -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
             -e SCONE_CLI_CONFIG="/identity/config.json" \
             -e CAS_KEY_HASH="$CAS_KEY_HASH" \
             -e CAS_PROVISIONING_TOKEN="$CAS_PROVISIONING_TOKEN" \
@@ -2345,94 +2526,10 @@ EOF
             -e SCONE_NO_TIME_THREAD=1 \
             ${SCONECLI_IMAGE} sh -c "scone cas provision host.docker.internal -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_TOLERATIONS ; if [ $? != 0 ] ; then echo 'Provisioning failed - checking if it is already partitioned!' ; scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo 'Provisioning of CAS failed! FATAL ERROR: please ensure that you use a CAS that permits DB-Key injection or correct SGX_TOLERATIONS to SGX_STD_TOLERATIONS' ; exit 1 ; else  echo 'CAS is already provisioned' ; fi ; fi "
 
-        sed 's/^/          /' "$TARGET_DIR/identity/config.json" >  "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json"
-        export OWNER_IDENTITY=$(sed "s/host.docker.internal/$SVCNAME.$NAMESPACE/" "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json")
-        echo "$OWNER_IDENTITY" > "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json"
-
-        BACKUP_POLICY_TEMPLATE="$TARGET_DIR/identity/backup-controller-session-$POLICY_NAME.yaml.template"
-        BACKUP_POLICY="$TARGET_DIR/identity/backup-controller-session-$POLICY_NAME.yaml"
-        set_platform_ids
-        download_file "$CAS_BACKUP_POLICY_URL" "$BACKUP_POLICY_TEMPLATE"
-
-        SCONE="\$SCONE" envsubst < "$BACKUP_POLICY_TEMPLATE" > "$BACKUP_POLICY"
-
-        verbose "Creating Backup Policy $POLICY_NAME for CAS $NAME in namespace $NAMESPACE (see file $BACKUP_POLICY)"
-
-        PROVISIONED_POLICY="$TARGET_DIR/identity/provisioned.yaml"
-        cat > "$PROVISIONED_POLICY" <<EOF
-name: provisioned
-version: "0.3.10"
-predecessor:
-
-access_policy:
-  read:
-    - ANY
-  update:
-    - CREATOR
-  create_sessions:
-    - CREATOR
-EOF
-
-        docker pull ${SCONECLI_IMAGE} >/dev/null
-        docker run --rm --platform linux/amd64 \
-            --add-host=host.docker.internal:host-gateway \
-            -v "$TARGET_DIR"/identity:/identity \
-            -v "$TARGET_DIR"/owner-config:/owner-config \
-            -e SCONE_CLI_CONFIG="/identity/config.json" \
-            -e SCONE_CAS_ADDR="host.docker.internal" \
-            -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
-            -e POLICY_NAME="$POLICY_NAME" \
-            -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
-            -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
-            -e SCONE_NO_TIME_THREAD=1 \
-            -e NAME="$NAME" \
-            ${SCONECLI_IMAGE} \
-            sh -c "export SCONE_MODE=sim; set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal ; scone session create /identity/backup-controller-session-$POLICY_NAME.yaml ; echo 'Exit:' $? ; scone session create /identity/provisioned.yaml ; echo Exit: '$?' ; echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}' ; scone cas show-identification -c ; echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}' ; scone cas show-identification -s ; echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'; scone cas show-identification --session-encryption-key"
-
+        upload_post_provisioning_sessions
     fi
 
-    # todo: next version - use encrypted policy and upload encrypted policy
-
-    kubectl get cas $NAME  --namespace "$NAMESPACE"
-
-    export cas_manifest="$TARGET_DIR/owner-config/cas-${NAMESPACE}-${NAME}-${VERSION}-manifest.yaml"
-
-    verbose "Creating manifest '$cas_manifest' for setting up CAS"
-
-    # next version: USE default external  manifest -> which can use $NAME and $NAMESPACE or fixed names
-
-    template_file="$TARGET_DIR/owner-config/cas-$NAMESPACE-$NAME-$VERSION-manifest.yaml.template"
-
-    verbose "Creating manifest '$cas_manifest' for CAS"
-    download_file "$CAS_MANIFEST_URL" "$template_file"
-
-    SCONE="\$SCONE" envsubst < "$template_file" > "$cas_manifest"
-
-    verbose "Creating/Applying CAS CR '$cas_manifest'"
-    kubectl apply -f "$cas_manifest" || error_exit "Applying of CAS Manifest '$cas_manifest' failed."
-
-    if [[ $do_wait_for_healthy == 1 ]]; then
-        wait_for_resource_phase "cas" "$NAME" "$NAMESPACE" "HEALTHY"
-    fi
-
-    # patch the cas to enable health checks (only works on a provisioned cas)
-    if [[ $NO_BACKUP -eq 1 ]]; then
-        # do_wait_for_healthy cannot be true here (if so, we error_exit earlier...)
-
-        # patch the cas to disable backup-controller
-        verbose "Switching Off Backup - only recommended for development!"
-        patches="{\"op\": \"replace\", \"path\": \"/spec/backup-controller/enabled\", \"value\": false,}, {\"op\": \"replace\", \"path\": \"/spec/backup-controller/session\", \"value\": \"${POLICY_NAME}/register\",},{\"op\": \"replace\", \"path\": \"/spec/backup-controller/image\", \"value\": \"$BACKUP_CONTROLLER_IMAGE\",},"
-        kubectl patch cas $NAME --namespace "$NAMESPACE" --type='json' -p='['"$patches"']'
-        kubectl get cas $NAME -n $NAMESPACE -o yaml > $cas_manifest
-    fi
-
-    verbose "The manifest of CAS '$NAME' in namespace '$NAMESPACE' is stored in $cas_manifest"
-    verbose "  - You can modify the metadata and spec fields of the manifest and apply the changes with 'kubectl apply -f \"$cas_manifest\""
-    verbose "The owner identity of CAS '$NAME' in namespace '$NAMESPACE' is stored in directory \"$TARGET_DIR/identity\""
-
-    verbose "Done. Shutting down tunnel"
-    kill $SERVICE_PID
-
+    enable_post_provisioning_features
 fi
 
 if [ "$SVC" == "vault" ] ; then
@@ -2483,7 +2580,7 @@ if [ "$SVC" == "vault" ] ; then
     docker pull ${SCONECLI_IMAGE} >/dev/null
     docker run --rm --platform linux/amd64 \
         --add-host=host.docker.internal:host-gateway \
-        -v "$TARGET_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
         -e OWNER_ID="$OWNER_ID" \
         -e REVIEWER_JWT="$REVIEWER_JWT" \
@@ -2498,7 +2595,7 @@ if [ "$SVC" == "vault" ] ; then
         -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
         -e NAMESPACE="$VAULT_NAMESPACE" \
         -e VAULT_NAME="$VAULT_NAME" \
-        -v "$TARGET_DIR"/policies:/policies \
+        -v "$TARGET_MOUNT_DIR"/policies:/policies \
         -e SCONE_NO_TIME_THREAD=1 \
         -e NAME="$NAME" \
         ${SCONECLI_IMAGE} \
