@@ -42,7 +42,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.15"
+export K_PROVISION_VERSION="5.8.0-rc.16"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -347,21 +347,29 @@ function check_prerequisites() {
         exit_msg="No access to Kubernetes cluster!"
     fi
 
+    verbose "Checking if the docker daemon is running locally"
 
-    verbose "Checking that we have local access to container images repo $IMAGE_REPO."
+    if ! docker ps &> /dev/null > /dev/null
+    then
+        echo -e "${RED}It seems that the docker daemon is not running!${NC}"
+        echo -e "- ${ORANGE}Please ensure that the docker daemon is running${NC}"
+        exit_msg="No access to local docker daemon!"
+    else
+        verbose "Checking that we have local access to container images repo $IMAGE_REPO."
 
-    Fixit=0
-    export PULL_IMAGE="$IMAGE_REPO/k8soperators:$VERSION"
-    docker pull "$PULL_IMAGE" 2>/dev/null || Fixit=2
+        Fixit=0
+        export PULL_IMAGE="$IMAGE_REPO/k8soperators:$VERSION"
+        docker pull "$PULL_IMAGE" 2>/dev/null || Fixit=2
 
-    if [[ $Fixit != 0 ]] ; then
-        warning "No access to images repo $IMAGE_REPO: cannot pull image $PULL_IMAGE"
-        if [[ $PLUGIN == 0 || $ACCOUNT_INFO == 0 ]] ; then
-            warning "set flags $deploy_plugin_flag $fix_flag to ensure that we fix locally pull container images"
-            exit_msg="Cannot access repo $IMAGE_REPO."
-        else
-            echo "$REGISTRY_ACCESS_TOKEN" | docker login --username "$REGISTRY_USERNAME" --password-stdin "$IMAGE_REPO" || error_exit "Login into repo $IMAGE_REPO failed. Please check credentials!"
-            docker pull "$PULL_IMAGE" >/dev/null || exit_msg="We cannot pull image $PULL_IMAGE - please check the credentials and the Image name!"
+        if [[ $Fixit != 0 ]] ; then
+            warning "No access to images repo $IMAGE_REPO: cannot pull image $PULL_IMAGE"
+            if [[ $PLUGIN == 0 || $ACCOUNT_INFO == 0 ]] ; then
+                warning "set flags $deploy_plugin_flag $fix_flag to ensure that we fix locally pull container images"
+                exit_msg="Cannot access repo $IMAGE_REPO."
+            else
+                echo "$REGISTRY_ACCESS_TOKEN" | docker login --username "$REGISTRY_USERNAME" --password-stdin "$IMAGE_REPO" || error_exit "Login into repo $IMAGE_REPO failed. Please check credentials!"
+                docker pull "$PULL_IMAGE" >/dev/null || exit_msg="We cannot pull image $PULL_IMAGE - please check the credentials and the Image name!"
+            fi
         fi
     fi
 
