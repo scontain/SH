@@ -26,7 +26,7 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.17"
+export K_PROVISION_VERSION="5.8.0-rc.18"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -1181,7 +1181,7 @@ function post_provisioning() {
     check_port_forward
     cas_svc_port_forward
 
-    export POLICY_NAME="$NAME-$NAMESPACE-backup-controller"
+    export POLICY_NAME="cas-owner/primary-backup"
     export SCONE_CLI_MRENCLAVE="$(docker run --platform linux/amd64 --pull always --rm --entrypoint scone -e SCONE_HASH=1 "$BACKUP_CONTROLLER_IMAGE" cas | tr -d '\r')"
 
     post_provision_attest
@@ -1239,6 +1239,18 @@ function enable_post_provisioning_features() {
     kill $SERVICE_PID
 }
 
+function replace_needle_by_str() {
+    in_string=$1
+    needle=$2
+    repl_string=$3
+    echo ${in_string//$needle/$repl_string}
+}
+
+function make_string_ok_for_filename() {
+    in_string=$1
+    replace_needle_by_str $in_string "/" "_"
+}
+
 function upload_post_provisioning_sessions() {
     owner_id_file=$post_provisioning_owner_config
     if [[ "$owner_id_file" == "" ]]; then
@@ -1248,8 +1260,12 @@ function upload_post_provisioning_sessions() {
     export OWNER_IDENTITY=$(sed "s/host.docker.internal/$SVCNAME.$NAMESPACE/" "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json")
     echo "$OWNER_IDENTITY" > "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json"
 
-    BACKUP_POLICY_TEMPLATE="$TARGET_DIR/identity/backup-controller-session-$POLICY_NAME.yaml.template"
-    BACKUP_POLICY="$TARGET_DIR/identity/backup-controller-session-$POLICY_NAME.yaml"
+    CAS_OWNER_POLICY="$TARGET_DIR/identity/cas-owner-session-$NAME-$NAMESPACE.yaml"
+    download_file "$CAS_OWNER_POLICY_URL" "$CAS_OWNER_POLICY"
+
+    fn_policy_name=$(make_string_ok_for_filename $POLICY_NAME)
+    BACKUP_POLICY_TEMPLATE="$TARGET_DIR/identity/backup-controller-session-$fn_policy_name.yaml.template"
+    BACKUP_POLICY="$TARGET_DIR/identity/backup-controller-session-$fn_policy_name.yaml"
     set_platform_ids
     download_file "$CAS_BACKUP_POLICY_URL" "$BACKUP_POLICY_TEMPLATE"
 
@@ -1286,7 +1302,7 @@ EOF
         -e SCONE_NO_TIME_THREAD=1 \
         -e NAME="$NAME" \
         ${SCONECLI_IMAGE} \
-        sh -c "export SCONE_MODE=sim; set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal ; scone session create /identity/backup-controller-session-$POLICY_NAME.yaml ; echo 'Exit:' $? ; scone session create /identity/provisioned.yaml ; echo Exit: '$?' ; echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}' ; scone cas show-identification -c ; echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}' ; scone cas show-identification -s ; echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'; scone cas show-identification --session-encryption-key"
+        sh -c "export SCONE_MODE=sim; set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal ; scone session create /identity/cas-owner-session-$NAME-$NAMESPACE.yaml ; echo 'Exit:' $? ; scone session create /identity/backup-controller-session-$fn_policy_name.yaml ; echo 'Exit:' $? ; scone session create /identity/provisioned.yaml ; echo Exit: '$?' ; echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}' ; scone cas show-identification -c ; echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}' ; scone cas show-identification -s ; echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'; scone cas show-identification --session-encryption-key"
 
 }
 
@@ -1382,6 +1398,7 @@ set_tolerations="--set-tolerations"
 set_toleration="--set-toleration"
 cas_recovery="--cas-database-recovery"
 local_backup="--local-backup"
+force_flag="--force"
 upgrade_flag="--upgrade"
 no_provisioning="--preprovision-only"
 post_provisioning_flag="--postprovision-only"
@@ -1403,6 +1420,7 @@ is_provisioned=0
 print_caskeys=0
 image_overwrite=""
 issue_manifest=0
+use_force=0
 do_verify=0
 do_create_policy=0
 do_help=0
@@ -1502,6 +1520,9 @@ function set_defaults() {
     fi
     if [[ "$CAS_PROVISIONING_URL" == "" ]] ; then
         export CAS_PROVISIONING_URL="$MANIFESTS_URL/$VERSION/cas_provisioning.yaml"
+    fi
+    if [[ "$CAS_OWNER_POLICY_URL" == "" ]] ; then
+        export CAS_OWNER_POLICY_URL="$MANIFESTS_URL/$VERSION/cas-owner.yaml"
     fi
     if [[ "$CAS_BACKUP_POLICY_URL" == "" ]] ; then
         export CAS_BACKUP_POLICY_URL="$MANIFESTS_URL/$VERSION/backup_policy.yaml"
@@ -1609,10 +1630,13 @@ usage ()
     echo "                  Example: \"--accept-group-out-of-date --accept-sw-hardening-needed --accept-configuration-needed\""
     echo "                  See https://sconedocs.github.io/CAS_cli/#scone-cas-attest for more details."
     echo "    $upgrade_flag \"<VERSION>\""
-    echo "                  Perform software upgrade of CAS. This will perform the following steps:"
+    echo "                  Perform software upgrade of SVC. If SVC is cas, this will perform the following steps:"
     echo "                  1. Update the policy of the backup controller (requires owner credentials)"
     echo "                  2. Upgrade the backup controller by updating the CAS custom resource manifest."
     echo "                  3. Upgrade the CAS service by updating the CAS image."
+    echo "    $force_flag"
+    echo "                  Use force when:"
+    echo "                  - performing an upgrade of an unhealthy CAS"
     echo "    $verify_sign_key_flag <PUBLIC-KEY PATH>"
     echo "                  Path to the public key to use for verification of signed images."
     echo "                  For the verification of signed images in the"
@@ -1654,6 +1678,7 @@ usage ()
     echo "  - CAS_PATCH_PROBES_AND_BACKUP_JSON_URL=\"$CAS_PATCH_PROBES_AND_BACKUP_JSON_URL\""
     echo "  - CAS_PATCH_PROBES_JSON_URL=\"$CAS_PATCH_PROBES_JSON_URL\""
     echo "  - CAS_PROVISIONING_URL=\"$CAS_PROVISIONING_URL\""
+    echo "  - CAS_OWNER_POLICY_URL=\"$CAS_OWNER_POLICY_URL\""
     echo "  - CAS_BACKUP_POLICY_URL=\"$CAS_BACKUP_POLICY_URL\""
     echo "  - SGX_TOLERATIONS=\"$SGX_TOLERATIONS\""
     echo "  - SGX_STD_TOLERATIONS=\"$SGX_STD_TOLERATIONS\""
@@ -1817,6 +1842,10 @@ while [[ "$#" -gt 0 ]]; do
             do_wait_for_healthy=1
             shift # past argument
             ;;
+        ${force_flag})
+            use_force=1
+            shift # past argument
+            ;;
         ${image_flag})
             image_overwrite="$2"
             if [ ! -n "${image_overwrite}" ]; then
@@ -1921,6 +1950,10 @@ fi
 if [[ "$NAME" == "" ]] ; then
     verbose "No service NAME specified - using '$SVC' as NAME"
     NAME="$SVC"
+fi
+
+if [[ $use_force == 1 && $do_cas_upgrade == 0 ]]; then
+    error_exit "We only support $force_flag together with $upgrade_flag and SVC cas."
 fi
 
 if [[ "${SVC}" == "vault" ]]; then
@@ -2040,7 +2073,7 @@ fi
 if [ $do_cas_upgrade == 1 ]
 then
     if [[ "$SVC" != "cas" ]] ; then
-        error_exit "Only CAS upgrade is supported: $SVC is not yet supported"
+        error_exit "Only CAS/vault upgrade is supported: $SVC is not yet supported"
     fi
     if [[ "$VERSION" == "$cas_upgrade_version" ]] ; then
         error_exit "CAS upgrade would not change the version: requested version is $cas_upgrade_version (existing is $VERSION)"
@@ -2057,7 +2090,10 @@ then
     verbose "Current CAS image '$IMAGE' has tag '$TAG'"
     IMAGE="$IMAGE:$TAG"
     if [[ "$VERSION" != "$TAG" ]] ; then
-        error_exit "Expected CAS of version $VERSION but found image of version $TAG. Please set the correct expected version. Exiting."
+        if [[ $use_force == 0 ]]; then
+            error_exit "Expected CAS of version $VERSION but found image of version $TAG. Please set the correct expected version. Exiting."
+        fi
+        warning "Performing forced upgrade of cas $NAME in namespace $NAMESPACE. Continuing although its image has the version $TAG instead of the expected $VERSION."
     fi
 
     if [[ "$image_overwrite" != "" ]] ; then
@@ -2068,7 +2104,10 @@ then
     NEXT_IMAGE="$CAS_UPGRADE_IMAGE"
 
     if [[ "$IMAGE" != "$EXPECTED_IMAGE"  ]] ; then
-        error_exit "Expected CAS Image '$EXPECTED_IMAGE' but retrieved  '$IMAGE'. We only support CAS upgrade for expected image versions - exiting! "
+        if [[ $use_force == 0 ]]; then
+            error_exit "Expected CAS Image '$EXPECTED_IMAGE' but retrieved  '$IMAGE'. We only support CAS upgrade for expected image versions - exiting! "
+        fi
+        warning "Performing forced upgrade of cas $NAME in namespace $NAMESPACE. Continuing although its current image is not the expected. Current: $IMAGE. Expected: $EXPECTED_IMAGE."
     fi
 
     verbose "Checking if CAS is healthy"
@@ -2076,7 +2115,10 @@ then
     STATE=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.state}')
 
     if [[ "$STATE" != "HEALTHY" ]] ; then
-        error_exit "State of CAS '$NAME' in namespace '$NAMESPACE' is '$STATE': Expected HEALTHY state. Exiting!"
+        if [[ $use_force == 0 ]]; then
+            error_exit "State of CAS '$NAME' in namespace '$NAMESPACE' is '$STATE': Expected HEALTHY state. Exiting!"
+        fi
+        warning "Performing forced upgrade of cas $NAME in namespace $NAMESPACE. Continuing although its state is $STATE as opposed to HEALTHY"
     fi
 
     export SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
@@ -2444,7 +2486,7 @@ if [[ $EXISTS == 0 || "${SVC}" == "cas" ]] ; then
         exit 0
     fi
 
-    export POLICY_NAME="$NAME-$NAMESPACE-backup-controller"
+    export POLICY_NAME="cas-owner/primary-backup"
 
     export SCONE_CLI_MRENCLAVE="$(docker run --platform linux/amd64 --pull always --rm --entrypoint scone -e SCONE_HASH=1 "$BACKUP_CONTROLLER_IMAGE" cas | tr -d '\r')"
 
