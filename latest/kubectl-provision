@@ -26,7 +26,7 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.19"
+export K_PROVISION_VERSION="5.8.0-rc.20"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -2393,7 +2393,7 @@ if [[ $EXISTS == 0 ]] ; then
     template_file="$TARGET_DIR/owner-config/cas-$NAMESPACE-$NAME-$VERSION-provisioning-step.yaml.template"
     manifest="$TARGET_DIR/owner-config/cas-$NAMESPACE-$NAME-$VERSION-provisioning-step.yaml"
 
-    verbose "Creating manifest '$manifest' for CAS provsioning"
+    verbose "Creating manifest '$manifest' for CAS provisioning"
     download_file "$CAS_PROVISIONING_URL" "$template_file"
 
     SCONE="\$SCONE" envsubst < "$template_file" > "$manifest"
@@ -2566,7 +2566,7 @@ EOF
             -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
             -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
             -e SCONE_NO_TIME_THREAD=1 \
-            ${SCONECLI_IMAGE} sh -c "scone cas provision host.docker.internal -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_TOLERATIONS ; if [ $? != 0 ] ; then echo 'Provisioning failed - checking if it is already partitioned!' ; scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo 'Provisioning of CAS failed! FATAL ERROR: please ensure that you use a CAS that permits DB-Key injection or correct SGX_TOLERATIONS to SGX_STD_TOLERATIONS' ; exit 1 ; else  echo 'CAS is already provisioned' ; fi ; fi "
+            ${SCONECLI_IMAGE} sh -c 'scone cas provision host.docker.internal -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_TOLERATIONS || scone cas provision host.docker.internal -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_STD_TOLERATIONS || { echo "Provisioning failed - checking if it is already provisioned!" ; scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "Provisioning of CAS failed! FATAL ERROR: please ensure that you use a CAS that permits DB-Key injection or correct SGX_TOLERATIONS to SGX_STD_TOLERATIONS" ; exit 1 ; else  echo "CAS is already provisioned" ; fi } '
 
         upload_post_provisioning_sessions
     fi
