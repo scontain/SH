@@ -1173,8 +1173,9 @@ function print_vault_keys {
 }
 
 # NOTE: verbose will only show up if you execute with "V=1 ./kubectl-kubectl"
+set +e
 source "$CONFIG_FILE" 2>/dev/null || verbose "Note: could not load config file \"$CONFIG_FILE\" - Ignoring."
-
+set -e
 
 function post_provisioning() {
     export SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
