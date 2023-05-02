@@ -26,7 +26,7 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.20"
+export K_PROVISION_VERSION="5.8.0-rc.21"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -1366,6 +1366,21 @@ function retrieve_cas_json() {
     echo $cas_json
 }
 
+function get_backup_controller_pod_name() {
+    local cas_name
+    local namespace
+    cas_name="$1"
+    namespace="$2"
+    backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+    num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l)
+    while [[ "$num_backup_controller_pods" != "1" ]]; do
+        sleep 1
+        backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$name -n $namespace -o name)
+        num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l)
+    done
+    echo $backup_controller_name
+}
+
 SERVICE_PID=0
 help_flag="--help"
 ns_flag="--namespace"
@@ -2192,6 +2207,7 @@ then
 
     verbose "Upgrading CAS custom resource manifest '$cas_manifest' to update the backup controller image"
 
+    old_backup_controller_name=$(get_backup_controller_pod_name "$NAME" "$NAMESPACE")
 
     kubectl get cas $NAME -n $NAMESPACE -o json > "$cas_manifest_json" || error_exit "failed to retrieve CAS manifest"
 
@@ -2215,6 +2231,25 @@ then
         verbose "Waiting for CAS to become UNHEALTHY - current state is $STATE"
     done
     verbose "CAS state is not HEALTHY - as expected when changing backup controller image"
+
+    new_backup_controller_name=$(get_backup_controller_pod_name "$NAME" "$NAMESPACE")
+    while [[ "$new_backup_controller_pods" == "$old_backup_controller_name" ]]; do
+        sleep 1
+        new_backup_controller_name=$(get_backup_controller_pod_name "$NAME" "$NAMESPACE")
+    done
+    num_schedulable_and_capable_nodes=$(kubectl get nodes --field-selector spec.unschedulable=false -o name|xargs -n 1 kubectl get --show-labels | grep -e "sgx.intel.com/capable=true"|wc -l)
+    expected_migration="$num_schedulable_and_capable_nodes/$num_schedulable_and_capable_nodes"
+    verbose "The name of the backup-controller pod has changed. Let's wait for the new one to have $expected_migration registered backups."
+
+    actual_migration=""
+    while [[ "$actual_migration" != "$expected_migration" ]]; do
+        sleep 1
+        actual_migration=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.migrationNodeRatio}')
+        verbose "Waiting for all nodes, i.e., $expected_migration, to be registered for backup. Now: $actual_migration."
+    done
+    verbose "All $expected_migration nodes are now registered for backup."
+
+    STATE=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.state}')
     while [[ "$STATE" != "HEALTHY"  ]] ; do
         sleep 1
         STATE=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.state}')
