@@ -26,7 +26,7 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.23"
+export K_PROVISION_VERSION="5.8.0-rc.24"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -643,6 +643,7 @@ function session_hash {
         -e SCONE_CAS_ADDR="$SCONE_CAS_ADDR" \
         -e SCONE_NO_TIME_THREAD=1 \
         -e POLICY_NAME="$POLICY" \
+        -e SCONE_PRODUCTION=0 \
         -e SCONE_MODE="sim" \
         -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
         -e NAME="$NAME" \
@@ -676,6 +677,7 @@ function get_policy_and_its_hash() {
         -e OUT_DIR="/$relative_policy_target_dir" \
         -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
         -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+        -e SCONE_PRODUCTION=0 \
         -e SCONE_MODE="auto" \
         -e SCONE_NO_TIME_THREAD=1 \
         -e NAME="$NAME" \
@@ -865,6 +867,7 @@ function upgrade_vault() {
         -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
         -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
         -e SCONE_NO_TIME_THREAD=1 \
+        -e SCONE_PRODUCTION=0 \
         -e SCONE_MODE="auto" \
         -e NAME="$NAME" \
         ${SCONECLI_IMAGE} \
@@ -1038,6 +1041,8 @@ function create_vault_policy {
         -e POLICY_FILE="$path_in_container" \
         -e SCONE_NO_TIME_THREAD=1 \
         -e NAME="$NAME" \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="sim" \
         ${SCONECLI_IMAGE} \
         sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal && export SCONE_CAS_ADDR=\$CLUSTER_SCONE_CAS_ADDR && export OWNER=\$(scone self show-key-hash) && scone session create --use-env \$POLICY_FILE"
 
@@ -1072,6 +1077,8 @@ function check_if_provisioned {
         -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
         -e SCONE_NO_TIME_THREAD=1 \
         -e NAME="$NAME" \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="sim" \
         ${SCONECLI_IMAGE} \
         bash -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal ;  scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "CAS is NOT provisioned" ; else  echo "CAS is provisioned" ; fi ' | tail -1 )
 
@@ -1116,6 +1123,8 @@ function print_cas_keys {
         -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
         -e SCONE_NO_TIME_THREAD=1 \
         -e NAME="$NAME" \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="sim" \
         ${SCONECLI_IMAGE} \
         sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal > /dev/null 2> /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal > /dev/null 2> /dev/nul || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }   ; scone cas set-default host.docker.internal ; echo -en 'export CAS_KEY=\"' ; scone cas show-identification -c  | tr -d '\n'  ; echo -en '\"\nexport CAS_SOFTWARE_KEY=\"' ; scone cas show-identification -s | tr -d '\n' ; echo -en '\"\nexport CAS_SESSION_ENCRYPTION_KEY=\"'; scone cas show-identification --session-encryption-key  | tr -d '\n' ; echo -en '\"\nexport CAS_CERT=\"' ; scone cas show-certificate ; echo -en '\"\n' "
 
@@ -1155,6 +1164,8 @@ function print_vault_keys {
           -e NAME="$NAME" \
           -e NAMESPACE="$NAMESPACE" \
           -e SCONE_NO_TIME_THREAD=1 \
+          -e SCONE_PRODUCTION=0 \
+          -e SCONE_MODE="sim" \
           ${SCONECLI_IMAGE} \
           bash -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal > /dev/null 2> /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal > /dev/null 2> /dev/nul || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal ; scone cas show-identification --cas-software-certificate   > "/cas-certs/${CAS}_${NAMESPACE}.cert"' || { kill -9 $SERVICE_PID ; error_exit "Failed to determine CAS certificate of $SVCNAME in namespace $NAMESPACE." ; }
 
@@ -1199,6 +1210,7 @@ function post_provision_attest() {
         -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
         -e SCONE_NO_TIME_THREAD=1 \
         -e POLICY_NAME="$POLICY_NAME" \
+        -e SCONE_PRODUCTION=0 \
         -e SCONE_MODE="sim" \
         -e NAME="$NAME" \
         ${SCONECLI_IMAGE} \
@@ -1301,6 +1313,7 @@ EOF
         -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
         -e SCONE_NO_TIME_THREAD=1 \
         -e NAME="$NAME" \
+        -e SCONE_PRODUCTION=0 \
         ${SCONECLI_IMAGE} \
         sh -c "export SCONE_MODE=sim; set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal ; scone session create /identity/cas-owner-session-$NAME-$NAMESPACE.yaml ; echo 'Exit:' $? ; scone session create /identity/backup-controller-session-$fn_policy_name.yaml ; echo 'Exit:' $? ; scone session create /identity/provisioned.yaml ; echo Exit: '$?' ; echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}' ; scone cas show-identification -c ; echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}' ; scone cas show-identification -s ; echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'; scone cas show-identification --session-encryption-key"
 
@@ -2190,6 +2203,7 @@ then
             -e POLICY_NAME="$POLICY_NAME" \
             -e OLD_SCONE_CLI_MRENCLAVE="$OLD_SCONE_CLI_MRENCLAVE" \
             -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
+            -e SCONE_PRODUCTION=0 \
             -e SCONE_MODE="sim" \
             -e NAME="$NAME" \
             ${SCONECLI_IMAGE} \
@@ -2601,6 +2615,8 @@ EOF
             -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
             -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
             -e SCONE_NO_TIME_THREAD=1 \
+            -e SCONE_PRODUCTION=0 \
+            -e SCONE_MODE="sim" \
             ${SCONECLI_IMAGE} sh -c 'scone cas provision host.docker.internal -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_TOLERATIONS || scone cas provision host.docker.internal -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_STD_TOLERATIONS || { echo "Provisioning failed - checking if it is already provisioned!" ; scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "Provisioning of CAS failed! FATAL ERROR: please ensure that you use a CAS that permits DB-Key injection or correct SGX_TOLERATIONS to SGX_STD_TOLERATIONS" ; exit 1 ; else  echo "CAS is already provisioned" ; fi } '
 
         upload_post_provisioning_sessions
@@ -2675,6 +2691,8 @@ if [ "$SVC" == "vault" ] ; then
         -v "$TARGET_MOUNT_DIR"/policies:/policies \
         -e SCONE_NO_TIME_THREAD=1 \
         -e NAME="$NAME" \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="sim" \
         ${SCONECLI_IMAGE} \
         sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }   && scone cas set-default host.docker.internal && export SCONE_CAS_ADDR=\$CLUSTER_SCONE_CAS_ADDR && export OWNER=\$(scone self show-key-hash) && PREDECESSOR=\~ CAS_POLICY_NAMESPACE= scone session create --use-env /policies/vault-image-mrenclaves.yaml && scone session create --use-env /policies/session.yaml && scone session create --use-env /policies/verify.yaml"
 
