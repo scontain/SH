@@ -26,7 +26,7 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0-rc.24"
+export K_PROVISION_VERSION="5.8.0-rc.25"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -41,7 +41,12 @@ export NC='\e[0m' # No Color
 export SCONTAIN_IMAGE_REPO="registry.scontain.com/scone.cloud"
 export DEFAULT_MANIFESTS_URL="https://raw.githubusercontent.com/scontain/manifests/main"
 export DEFAULT_DCAP_KEY="aecd5ebb682346028d60c36131eb2d92"
-export CAS_CLIENT_PORT=8081
+export DEFAULT_CAS_CLIENT_PORT=8081
+export CAS_CLIENT_PORT=""
+# TODO: Set CAS_ENCLAVE_PORT the same way as CAS_CLIENT_PORT
+export CAS_ENCLAVE_PORT=18765
+
+BASE_OWNER_IDENTITY_FILE_REL_LOC="identity/base-owner-identity.json"
 
 function verbose () {
     if [[ $V -eq 1 ]]; then
@@ -497,6 +502,43 @@ function wait_for_resource_status_field() {
 
 
 #
+# wait_for_non_target_resource_status_field waits for the status field 'field' ($4) of resource 'name' ($2) of kind 'kind' ($1) in namespace 'namespace' ($3) to not be equal to 'non_target_value' ($5). If no non_target_value is provided it waits for the status field to have a non-empty value.
+#
+
+function wait_for_non_target_resource_status_field() {
+    local kind
+    local name
+    local namespace
+    local field
+    local non_target_value
+
+    local value
+    local dots
+
+    kind=$1
+    name=$2
+    namespace=$3
+    field=$4
+    non_target_value=$5
+
+    dots="."
+    value=$(retrieve_status_field "$kind" "$name" "$namespace" "$field")
+    echo "Waiting for the status field '$field' of $kind '$name' in namespace '$namespace' to not be equal to $non_target_value"
+
+    while [[ "$value" == "$non_target_value"  ]] ; do
+        sleep 1
+        dots="${dots}."
+        if [[ ${#dots} == 20 ]]; then
+            dots="."
+        fi
+        value=$(retrieve_status_field "$kind" "$name" "$namespace" "$field")
+        echo -en "\r\e[K$dots"
+    done
+    echo "OK"
+}
+
+
+#
 # wait_for_resource_phase waits for resource 'name' ($2) of kind 'kind' ($1) in namespace 'namespace' ($3) to enter phase 'target_phase' ($4)
 #
 
@@ -633,7 +675,7 @@ function session_hash {
 
     check_port_forward
     cas_addr_port_forward $CAS_NAME
-    export SCONE_CAS_ADDR="host.docker.internal"
+    export SCONE_CAS_ADDR="host.docker.internal:$CAS_ENCLAVE_PORT"
 
     docker pull ${SCONECLI_IMAGE} >/dev/null
     docker run --rm --platform linux/amd64  \
@@ -648,7 +690,7 @@ function session_hash {
         -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
         -e NAME="$NAME" \
         ${SCONECLI_IMAGE} \
-        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal  ;   scone session read $POLICY > session.tmp;  scone session verify session.tmp ; "
+        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal  ;   scone session read $POLICY > session.tmp;  scone session verify session.tmp ; "
 
     if [[ $SERVICE_PID != 0 ]] ; then
         verbose "Shutting down port-forwarding"
@@ -680,9 +722,10 @@ function get_policy_and_its_hash() {
         -e SCONE_PRODUCTION=0 \
         -e SCONE_MODE="auto" \
         -e SCONE_NO_TIME_THREAD=1 \
+        -e CAS_CLIENT_PORT="$CAS_CLIENT_PORT" \
         -e NAME="$NAME" \
         ${SCONECLI_IMAGE} \
-        sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal > /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal > /dev/null || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal > /dev/null ; scone session read $POLICY_NAME > /dev/null 2> /dev/null ; scone session read $POLICY_NAME > ${OUT_DIR}/${OUT_FILE} ; export HASH=`scone session verify ${OUT_DIR}/${OUT_FILE}` ; echo $HASH' || echo ""
+        sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT > /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT > /dev/null || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal:$CAS_CLIENT_PORT > /dev/null ; scone session read $POLICY_NAME > /dev/null 2> /dev/null ; scone session read $POLICY_NAME > ${OUT_DIR}/${OUT_FILE} ; export HASH=`scone session verify ${OUT_DIR}/${OUT_FILE}` ; echo $HASH' || echo ""
 
 }
 
@@ -869,9 +912,10 @@ function upgrade_vault() {
         -e SCONE_NO_TIME_THREAD=1 \
         -e SCONE_PRODUCTION=0 \
         -e SCONE_MODE="auto" \
+        -e CAS_CLIENT_PORT="$CAS_CLIENT_PORT" \
         -e NAME="$NAME" \
         ${SCONECLI_IMAGE} \
-        sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal ; OWNER=$(scone self show-key-hash) scone session update --use-env $POLICY' || true
+        sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal:$CAS_CLIENT_PORT ; OWNER=$(scone self show-key-hash) scone session update --use-env $POLICY' || true
 
     verbose "Verifiying that the upgrade changed the policy ${policy_name}'s hash in the CAS $NAME in namespace $NAMESPACE"
     verbose "--- Retrieving policy $policy_name (saving it in $TARGET_DIR/vault_policies: upgraded_${vault_upgrade_version}_${policy_name}.yaml and upgraded_${vault_upgrade_version}_${policy_name}_hash)"
@@ -1031,7 +1075,7 @@ function create_vault_policy {
         -v "$TARGET_MOUNT_DIR"/identity:/identity \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
         -e OWNER_ID="$OWNER_ID" \
-        -e SCONE_CAS_ADDR="host.docker.internal" \
+        -e SCONE_CAS_ADDR="host.docker.internal:$CAS_ENCLAVE_PORT" \
         -e CLUSTER_SCONE_CAS_ADDR="$SCONE_CAS_ADDR" \
         -e CAS_CLIENT_PORT="$CAS_CLIENT_PORT" \
         -e SCONE="$SCONE_ESCAPE_HACK" \
@@ -1044,7 +1088,7 @@ function create_vault_policy {
         -e SCONE_PRODUCTION=0 \
         -e SCONE_MODE="sim" \
         ${SCONECLI_IMAGE} \
-        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal && export SCONE_CAS_ADDR=\$CLUSTER_SCONE_CAS_ADDR && export OWNER=\$(scone self show-key-hash) && scone session create --use-env \$POLICY_FILE"
+        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal:$CAS_CLIENT_PORT && export SCONE_CAS_ADDR=\$CLUSTER_SCONE_CAS_ADDR && export OWNER=\$(scone self show-key-hash) && scone session create --use-env \$POLICY_FILE"
 
     echo "OK"
 }
@@ -1069,7 +1113,8 @@ function check_if_provisioned {
         -v "$TARGET_MOUNT_DIR"/identity:/identity \
         -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
-        -e SCONE_CAS_ADDR="host.docker.internal" \
+        -e SCONE_CAS_ADDR="host.docker.internal:$CAS_ENCLAVE_PORT" \
+        -e CAS_CLIENT_PORT="$CAS_CLIENT_PORT" \
         -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
         -e POLICY_NAME="$POLICY_NAME" \
         -e SCONE_LOG="ERROR" \
@@ -1080,7 +1125,7 @@ function check_if_provisioned {
         -e SCONE_PRODUCTION=0 \
         -e SCONE_MODE="sim" \
         ${SCONECLI_IMAGE} \
-        bash -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal ;  scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "CAS is NOT provisioned" ; else  echo "CAS is provisioned" ; fi ' | tail -1 )
+        bash -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal:$CAS_CLIENT_PORT ;  scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "CAS is NOT provisioned" ; else  echo "CAS is provisioned" ; fi ' | tail -1 )
 
     kill $SERVICE_PID
     if [[ $RESULT == "CAS is provisioned"* ]] ; then
@@ -1115,7 +1160,7 @@ function print_cas_keys {
         -v "$TARGET_MOUNT_DIR"/identity:/identity \
         -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
-        -e SCONE_CAS_ADDR="host.docker.internal" \
+        -e SCONE_CAS_ADDR="host.docker.internal:$CAS_ENCLAVE_PORT" \
         -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
         -e POLICY_NAME="$POLICY_NAME" \
         -e SCONE_LOG="ERROR" \
@@ -1126,7 +1171,7 @@ function print_cas_keys {
         -e SCONE_PRODUCTION=0 \
         -e SCONE_MODE="sim" \
         ${SCONECLI_IMAGE} \
-        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal > /dev/null 2> /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal > /dev/null 2> /dev/nul || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }   ; scone cas set-default host.docker.internal ; echo -en 'export CAS_KEY=\"' ; scone cas show-identification -c  | tr -d '\n'  ; echo -en '\"\nexport CAS_SOFTWARE_KEY=\"' ; scone cas show-identification -s | tr -d '\n' ; echo -en '\"\nexport CAS_SESSION_ENCRYPTION_KEY=\"'; scone cas show-identification --session-encryption-key  | tr -d '\n' ; echo -en '\"\nexport CAS_CERT=\"' ; scone cas show-certificate ; echo -en '\"\n' "
+        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT > /dev/null 2> /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT > /dev/null 2> /dev/nul || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }   ; scone cas set-default host.docker.internal:$CAS_CLIENT_PORT ; echo -en 'export CAS_KEY=\"' ; scone cas show-identification -c  | tr -d '\n'  ; echo -en '\"\nexport CAS_SOFTWARE_KEY=\"' ; scone cas show-identification -s | tr -d '\n' ; echo -en '\"\nexport CAS_SESSION_ENCRYPTION_KEY=\"'; scone cas show-identification --session-encryption-key  | tr -d '\n' ; echo -en '\"\nexport CAS_CERT=\"' ; scone cas show-certificate ; echo -en '\"\n' "
 
     kill $SERVICE_PID
     trap '' EXIT
@@ -1155,7 +1200,8 @@ function print_vault_keys {
           -v "$TARGET_MOUNT_DIR"/identity:/identity \
           -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
           -e SCONE_CLI_CONFIG="/identity/config.json" \
-          -e SCONE_CAS_ADDR="host.docker.internal" \
+          -e SCONE_CAS_ADDR="host.docker.internal:$CAS_ENCLAVE_PORT" \
+          -e CAS_CLIENT_PORT="$CAS_CLIENT_PORT" \
           -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
           -e POLICY_NAME="$POLICY_NAME" \
           -e SCONE_LOG="ERROR" \
@@ -1167,7 +1213,7 @@ function print_vault_keys {
           -e SCONE_PRODUCTION=0 \
           -e SCONE_MODE="sim" \
           ${SCONECLI_IMAGE} \
-          bash -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal > /dev/null 2> /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal > /dev/null 2> /dev/nul || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal ; scone cas show-identification --cas-software-certificate   > "/cas-certs/${CAS}_${NAMESPACE}.cert"' || { kill -9 $SERVICE_PID ; error_exit "Failed to determine CAS certificate of $SVCNAME in namespace $NAMESPACE." ; }
+          bash -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT > /dev/null 2> /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT > /dev/null 2> /dev/nul || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal:$CAS_CLIENT_PORT ; scone cas show-identification --cas-software-certificate   > "/cas-certs/${CAS}_${NAMESPACE}.cert"' || { kill -9 $SERVICE_PID ; error_exit "Failed to determine CAS certificate of $SVCNAME in namespace $NAMESPACE." ; }
 
     export OWNER_ID=$(kubectl get vault $VAULT_NAME -n $VAULT_NAMESPACE -ojsonpath='{.spec.server.extraEnvironmentVars.OWNER_ID}' || error_exit "cannot determine Vault Ownership" )
 
@@ -1205,7 +1251,8 @@ function post_provision_attest() {
         --add-host=host.docker.internal:host-gateway \
         -v "$TARGET_MOUNT_DIR"/identity:/identity \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
-        -e SCONE_CAS_ADDR="host.docker.internal" \
+        -e SCONE_CAS_ADDR="host.docker.internal:$CAS_ENCLAVE_PORT" \
+        -e CAS_CLIENT_PORT="$CAS_CLIENT_PORT" \
         -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
         -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
         -e SCONE_NO_TIME_THREAD=1 \
@@ -1214,7 +1261,7 @@ function post_provision_attest() {
         -e SCONE_MODE="sim" \
         -e NAME="$NAME" \
         ${SCONECLI_IMAGE} \
-        sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default $SCONE_CAS_ADDR  ;' 
+        sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal:$CAS_CLIENT_PORT  ;'
 }
 
 
@@ -1263,14 +1310,148 @@ function make_string_ok_for_filename() {
     replace_needle_by_str $in_string "/" "_"
 }
 
-function upload_post_provisioning_sessions() {
-    owner_id_file=$post_provisioning_owner_config
-    if [[ "$owner_id_file" == "" ]]; then
-        owner_id_file="$TARGET_DIR/identity/config.json"
+function extract_owner_identity_content() {
+    local source_file="$1"
+
+    if [[ ! -f "$source_file" ]]; then
+        error_exit "Internal error: source_file '$source_file' does not exist in extract_owner_identity_content"
     fi
-    sed 's/^/          /' "$owner_id_file" >  "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json"
-    export OWNER_IDENTITY=$(sed "s/host.docker.internal/$SVCNAME.$NAMESPACE/" "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json")
-    echo "$OWNER_IDENTITY" > "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json"
+    local identity=$(cat $source_file | jq '.identity')
+    if [[ "$identity" == null || "$identity" == "" ]]; then
+        error_exit "Could not extract identity from $source_file in extract_owner_identity_content"
+    fi
+    local seed=$(cat $source_file | jq '.session_signing_keypair_ed25519_seed')
+    if [[ "$seed" == null || "$seed" == "" ]]; then
+        warning "Could not extract session_signing_keypair_ed25519_seed from $source_file in extract_owner_identity_content"
+        cat <<-END
+{
+    "identity": $identity,
+    "cas_db": {}
+}
+END
+    else
+        cat <<-END
+{
+    "identity": $identity,
+    "cas_db": {},
+    "session_signing_keypair_ed25519_seed": $seed
+}
+END
+    fi
+}
+
+function add_cas_db_info_to_owner_identity_file() {
+    local host_prefix="$1"
+    local identity_dir="$2"
+    local identity_rel_file_loc="$3"
+    local cas_name="$4"
+    local cas_namespace="$5"
+    local cas_client_port="$6"
+
+    if [[ "$host_prefix" == "" ]]; then
+        error_exit "Internal error: host_prefix empty in add_cas_db_info_to_owner_identity_file"
+    fi
+    if [[ "$identity_dir" == "" ]]; then
+        error_exit "Internal error: identity_dir empty in add_cas_db_info_to_owner_identity_file"
+    fi
+    if [[ "$identity_rel_file_loc" == "" ]]; then
+        error_exit "Internal error: identity_rel_file_loc empty in add_cas_db_info_to_owner_identity_file"
+    fi
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name empty in add_cas_db_info_to_owner_identity_file"
+    fi
+    if [[ "$cas_namespace" == "" ]]; then
+        error_exit "Internal error: cas_namespace empty in add_cas_db_info_to_owner_identity_file"
+    fi
+    if [[ "$cas_client_port" == "" ]]; then
+        error_exit "Internal error: cas_client_port empty in add_cas_db_info_to_owner_identity_file"
+    fi
+
+    local host_file_loc="$host_prefix/$identity_dir/$identity_rel_file_loc"
+    # The docker run commands below will change owner of the host_file_loc to root, thus preventing us from updating it later. Thus we first copy it...
+    cp $host_file_loc $host_file_loc.owned-by-root
+
+    local success=1
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    docker run --rm --platform linux/amd64 \
+        --add-host=host.docker.internal:host-gateway \
+        -v "$TARGET_MOUNT_DIR"/$identity_dir:/$identity_dir \
+        -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
+        -e SCONE_CLI_CONFIG="/$identity_dir/$identity_rel_file_loc.owned-by-root" \
+        -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+        -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+        -e SCONE_NO_TIME_THREAD=1 \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="sim" \
+        ${SCONECLI_IMAGE} \
+        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$cas_client_port || { echo ERROR: Attestation of CAS $cas_name in namespace $cas_namespace failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal:$cas_client_port" >& /dev/null || success=0
+
+    if [[ "$success" == 0 ]]; then
+        docker run --rm --platform linux/amd64 \
+            --add-host=host.docker.internal:host-gateway \
+            -v "$TARGET_MOUNT_DIR"/$identity_dir:/$identity_dir \
+            -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
+            -e SCONE_CLI_CONFIG="/$identity_dir/$identity_rel_file_loc.owned-by-root" \
+            -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+            -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+            -e SCONE_NO_TIME_THREAD=1 \
+            -e SCONE_PRODUCTION=0 \
+            -e SCONE_MODE="sim" \
+            ${SCONECLI_IMAGE} \
+            sh -c "set -e ; scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$cas_client_port || { echo ERROR: Attestation of CAS $cas_name in namespace $cas_namespace failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal:$cas_client_port" >& /dev/null
+    fi
+
+    # ... and then we copy it back
+    cp $host_file_loc.owned-by-root $host_file_loc
+    rm -f $host_file_loc.owned-by-root
+
+    attest_result=$(cat $host_file_loc | jq ".cas_db.\"host.docker.internal:$cas_client_port\"")
+    if [[ "$attest_result" == null ]]; then
+        echo "failed to add attestation for host.docker.internal:$cas_client_port"
+        return 1
+    fi
+    local configured_cas_client_port=$(kubectl get cas $cas_name -n $cas_namespace -o jsonpath='{.spec.service.clientPort}')
+    local file_content=$(sed "s/host.docker.internal:$cas_client_port/$cas_name.$cas_namespace:$configured_cas_client_port/" "$host_file_loc")
+    echo "$file_content" >  "$host_file_loc"
+}
+
+function get_owner_identity_for_policy_upload() {
+    local upload_identity_rel_file_loc="owner_id_${SVCNAME}_$NAMESPACE.json"
+    local upload_owner_identity_file_loc="$TARGET_DIR/identity/$upload_identity_rel_file_loc"
+    local source_owner_identity_file_loc="$1"
+
+    if [[ "$source_owner_identity_file_loc" == "" ]]; then
+        error_exit "Internal Error: source_owner_identity_file_loc is empty in get_owner_identity_for_policy_upload"
+    fi
+    extract_owner_identity_content "$source_owner_identity_file_loc" > "$upload_owner_identity_file_loc"
+    if [[ ! -f "$base_owner_identity_file_loc" ]]; then
+        # We save it for next time. Just in case...
+        cp "$upload_owner_identity_file_loc" "$base_owner_identity_file_loc"
+    fi
+    add_cas_db_info_to_owner_identity_file "$TARGET_DIR" "identity" "$upload_identity_rel_file_loc" "$SVCNAME" "$NAMESPACE" "$CAS_CLIENT_PORT" || error_exit "Could not attest CAS $SVCNAME in namespace $NAMESPACE"
+    sed 's/^/          /' "$upload_owner_identity_file_loc"
+}
+
+function upload_post_provisioning_sessions() {
+    local owner_identity
+    verbose "Create owner-identity file for backup-controller policy"
+
+    local source_owner_identity_file_loc="$post_provisioning_owner_identity"
+    local default_owner_identity_file_loc="$TARGET_DIR/identity/config.json"
+    local base_owner_identity_file_loc="$TARGET_DIR/$BASE_OWNER_IDENTITY_FILE_REL_LOC"
+
+    if [[ "$source_owner_identity_file_loc" == "" ]]; then
+        if [[ -f "$default_owner_identity_file_loc" ]]; then
+            source_owner_identity_file_loc=$default_owner_identity_file_loc
+        elif [[ -f "$base_owner_identity_file_loc" ]]; then
+            source_owner_identity_file_loc=$base_owner_identity_file_loc
+        else
+            error_exit "Could not find the owner-identity file of the CAS $SVCNAME in namespace $NAMESPACE. You can specify the file using the $post_provisioning_owner_identity_flag flag, or create one at the default location ($default_owner_identity_file_loc) by attesting the CAS."
+        fi
+    fi
+    verbose "    - Using owner-identity file $source_owner_identity_file_loc"
+
+    owner_identity=$(get_owner_identity_for_policy_upload "$source_owner_identity_file_loc") || error_exit "Could not extract the owner-identity to be used when uploading the backup-controller session"
 
     CAS_OWNER_POLICY="$TARGET_DIR/identity/cas-owner-session-$NAME-$NAMESPACE.yaml"
     download_file "$CAS_OWNER_POLICY_URL" "$CAS_OWNER_POLICY"
@@ -1281,7 +1462,7 @@ function upload_post_provisioning_sessions() {
     set_platform_ids
     download_file "$CAS_BACKUP_POLICY_URL" "$BACKUP_POLICY_TEMPLATE"
 
-    SCONE="\$SCONE" envsubst < "$BACKUP_POLICY_TEMPLATE" > "$BACKUP_POLICY"
+    POLICY_NAME="$POLICY_NAME" SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" OWNER_IDENTITY="$owner_identity" envsubst '$POLICY_NAME,${POLICY_NAME},$SCONE_CLI_MRENCLAVE,${SCONE_CLI_MRENCLAVE},$OWNER_IDENTITY,${OWNER_IDENTITY}' < "$BACKUP_POLICY_TEMPLATE" > "$BACKUP_POLICY"
 
     verbose "Creating Backup Policy $POLICY_NAME for CAS $NAME in namespace $NAMESPACE (see file $BACKUP_POLICY)"
 
@@ -1306,7 +1487,7 @@ EOF
         -v "$TARGET_MOUNT_DIR"/identity:/identity \
         -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
         -e SCONE_CLI_CONFIG="/identity/config.json" \
-        -e SCONE_CAS_ADDR="host.docker.internal" \
+        -e SCONE_CAS_ADDR="host.docker.internal:$CAS_ENCLAVE_PORT" \
         -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
         -e POLICY_NAME="$POLICY_NAME" \
         -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
@@ -1316,7 +1497,6 @@ EOF
         -e SCONE_PRODUCTION=0 \
         ${SCONECLI_IMAGE} \
         sh -c "export SCONE_MODE=sim; set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal ; scone session create /identity/cas-owner-session-$NAME-$NAMESPACE.yaml ; echo 'Exit:' $? ; scone session create /identity/backup-controller-session-$fn_policy_name.yaml ; echo 'Exit:' $? ; scone session create /identity/provisioned.yaml ; echo Exit: '$?' ; echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}' ; scone cas show-identification -c ; echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}' ; scone cas show-identification -s ; echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'; scone cas show-identification --session-encryption-key"
-
 }
 
 #
@@ -1394,6 +1574,463 @@ function get_backup_controller_pod_name() {
     echo $backup_controller_name
 }
 
+function wait_for_grep_in_cas_pod_log() {
+    local cas_name="$1"
+    local namespace="$2"
+    local needle="$3"
+    local grep_result=""
+    local retry=50
+    local pod=$(get_cas_pod_name $cas_name $namespace)
+
+    until kubectl logs $pod --namespace "$namespace" -c cas | grep "$needle"  > /dev/stderr
+    do
+        sleep 5
+        verbose "Waiting for '$needle' in cas pod log"
+        retry=$((retry - 1))
+        if [[ $retry == 0 ]] ; then
+            error_exit "Cannot retrieve '$needle' from log of pod $pod of CAS $cas_name in namespace $namespace. Bailing."
+        fi
+    done
+
+    grep_result=$(kubectl logs "$pod" --namespace "$namespace" -c cas | grep "$needle" | awk ' { print $NF } ')
+    grep_result=$(echo "$grep_result" | tail -1 )
+    echo $grep_result
+}
+
+function get_cas_provisioning_token() {
+    local cas_name="$1"
+    local namespace="$2"
+    local cas_provisioning_token=$(wait_for_grep_in_cas_pod_log $cas_name $namespace "CAS provisioning token")
+
+    if [[ "$cas_provisioning_token" == "" ]] ; then
+        error_exit "Could not retrieve CAS_PROVISIONING_TOKEN from log of CAS $cas_name in namespace $namespace. Got ''. Bailing."
+    fi
+    echo $cas_provisioning_token
+}
+
+function get_cas_key_hash() {
+    local cas_name="$1"
+    local namespace="$2"
+    local cas_key_hash=$(wait_for_grep_in_cas_pod_log $cas_name $namespace "CAS key hash")
+
+    if [[ "$cas_key_hash" == "" ]] ; then
+        error_exit "Could not retrieve CAS_KEY_HASH from log of CAS $cas_name in namespace $namespace. Got ''. Bailing."
+    fi
+    echo $cas_key_hash
+}
+
+function get_scone_cas_addr() {
+    local cas_name="$1"
+    local namespace="$2"
+    local svc_name=`kubectl get svc --namespace "$namespace" --selector "app.kubernetes.io/instance=$cas_name,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+    local scone_cas_addr=$(kubectl get svc --namespace "$namespace" "$svc_name" --template "{{ .spec.clusterIP }}")
+
+    if [[ "$scone_cas_addr" == "" ]] ; then
+        error_exit "Failed to determine SCONE_CAS_ADDR of service $svc_name in namespace $namespace"
+    fi
+    echo $scone_cas_addr
+}
+
+function get_cas_pod_name() {
+    local cas_name="$1"
+    local namespace="$2"
+    
+    local pod=""
+
+    until [[ $pod != "" ]]; do
+        verbose "Waiting for pod of CAS $cas_name in namespace $namespace to start"
+        sleep 5
+        pod=`kubectl get pod --selector "app.kubernetes.io/instance=$cas_name,app.kubernetes.io/name=cas" -n "$namespace" | tail -1 | awk '{ print $1 }'` || echo "..."
+    done
+    echo $pod
+}
+
+function get_backup_controller_pod_name() {
+    local cas_name
+    local namespace
+    cas_name="$1"
+    namespace="$2"
+    backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+    num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l)
+    while [[ "$num_backup_controller_pods" != "1" ]]; do
+        sleep 1
+        backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$name -n $namespace -o name)
+        num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l)
+    done
+    echo $backup_controller_name
+}
+
+function create_unprovisioned_cas() {
+    local cas_name="$1"
+    local namespace="$2"
+    local version="$3"
+    local target_dir="$4"
+    local manifest_url="$5"
+
+    # check args
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name was empty in create_cas_preprovision_only"
+    fi
+    if [[ "$namespace" == "" ]]; then
+        error_exit "Internal error: namespace was empty in create_cas_preprovision_only"
+    fi
+    if [[ "$version" == "" ]]; then
+        error_exit "Internal error: version was empty in create_cas_preprovision_only"
+    fi
+    if [[ "$target_dir" == "" ]]; then
+        error_exit "Internal error: target_dir was empty in create_cas_preprovision_only"
+    fi
+    if [[ "$manifest_url" == "" ]]; then
+        error_exit "Internal error: manifest_url was empty in create_cas_preprovision_only"
+    fi
+
+    # check flags
+    if [[ $do_preprovision == 0 ]]; then
+        error_exit "Internal error. Expected \$do_preprovision == 1 at this point. Was 0."
+    fi
+    if [[ "$SVC" != "cas" ]]; then
+        error_exit "The flag $no_provisioning is only allowed for SVC cas."
+    fi
+    if [[ $do_postprovision == 1 ]] ; then
+        error_exit "The flag $post_provisioning_flag is not allowed together with the $no_provisioning flag."
+    fi
+    if [[ $do_recovery == 1 && $do_preprovision == 1 ]] ; then
+        error_exit "The flag $cas_recovery is not allowed together with the $no_provisioning flag."
+    fi
+
+    # Check prerequisites
+    verbose "Checking if CAS '$cas_name' in namespace '$namespace' already exists"
+    local exists=1
+    kubectl get cas "$cas_name" --namespace "$namespace" > /dev/null 2>/dev/null || exists=0
+    if [[ $exists == 1 ]] ; then
+        error_exit "Cas $cas_name exists in namespace $namespace. Cannot perform preprovisioning only."
+    fi
+    if kubectl get pvc "database-$cas_name-0"  --namespace "$namespace" 2> /dev/null 1> /dev/null ; then
+        error_exit "pvc database-$cas_name-0 already exists in namespace $namespace - provision of CAS for existing volume not supported: We do not want to overwrite existing database"
+    fi
+
+    verbose "Determine cas image to use"
+    local cas_image="$CAS_IMAGE"
+    if [[ "$image_overwrite" != "" ]]; then
+        warning "Using a non-standard CAS image $image_overwrite instead of $cas_image"
+        cas_image="$image_overwrite"
+    fi
+
+    local manifest_file="$target_dir/owner-config/cas-$namespace-$cas_name-$version-provisioning-step.yaml"
+
+    verbose "Creating the manifest ($manifest_file) from which the CAS will be created"
+    local template_file="${manifest_file}.template"
+    download_file "$manifest_url" "$template_file"
+
+    NAME=$cas_name NAMESPACE=$namespace IMAGE=$cas_image envsubst '$NAME,${NAME},$NAMESPACE,${NAMESPACE},$IMAGE,${IMAGE}' < "$template_file" > "$manifest_file"
+
+    verbose "Creating CAS $cas_name in namespace $namespace from image $cas_image: kubectl apply -f $manifest_file"
+    kubectl apply -f "$manifest_file" 2> /dev/null 1> /dev/null || error_exit "Creation of CAS from manifest '$manifest_file' failed."
+
+    verbose "Retrieving CAS_KEY_HASH AND CAS_PROVISIONING_TOKEN from log of CAS '$cas_name' in namespace '$namespace'"
+
+    local cas_key_hash=$(get_cas_key_hash $cas_name $namespace)
+    local cas_provisioning_token=$(get_cas_provisioning_token $cas_name $namespace)
+
+    verbose "CAS '$cas_name' in namespace '$namespace' is ready. Exiting."
+    echo "export CAS_KEY_HASH=$cas_key_hash"
+    echo "export CAS_PROVISIONING_TOKEN=$cas_provisioning_token"
+    exit 0
+}
+
+function provision_unprovisioned_cas_wo_docker() {
+    local cas_name="$1"
+    local namespace="$2"
+    local scone_cas_addr="$3"
+
+    # check args
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name was empty in create_cas_preprovision_only"
+    fi
+    if [[ "$namespace" == "" ]]; then
+        error_exit "Internal error: namespace was empty in create_cas_preprovision_only"
+    fi
+
+    # check flags
+    if [[ $do_postprovision == 0 ]]; then
+        error_exit "Internal error. Expected \$do_postprovision == 1 at this point. Was 0."
+    fi
+    if [[ "$SVC" != "cas" ]]; then
+        error_exit "The flag $post_provisioning_flag is only allowed for SVC cas."
+    fi
+    if [[ $do_preprovision == 1 ]] ; then
+        error_exit "The flag $post_provisioning_flag is not allowed together with the $no_provisioning flag."
+    fi
+    if [[ $do_recovery == 1 && $do_postprovision == 1 ]] ; then
+        error_exit "The flag $cas_recovery is not allowed together with the $post_provisioning_flag flag."
+    fi
+
+    # Check prerequisites
+    verbose "Checking whether CAS '$cas_name' in namespace '$namespace' already exists"
+    local exists=1
+    kubectl get cas "$cas_name" --namespace "$namespace" > /dev/null 2>/dev/null || exists=0
+    if [[ $exists == 0 ]] ; then
+        error_exit "Cas $cas_name does not exist in namespace $namespace. Post-provisioning requires an existing CAS."
+    fi
+
+    cas_addr="$scone_cas_addr"
+    if [[ "$cas_addr" == "" ]]; then
+        cas_addr="$cas_name.$namespace"
+    fi
+    post_provisioning_wo_docker "$cas_name" "$namespace" "$cas_addr" "$CAS_CLIENT_PORT"
+    exit 0
+}
+
+function post_provisioning_wo_docker() {
+    local cas_name="$1"
+    local namespace="$2"
+    local cas_addr="$3"
+    local cas_client_port="$4"
+
+    local policy_name="cas-owner/primary-backup"
+    local scone_cli_mrenclave=$(SCONE_HASH=1 /opt/scone/bin/rust-cli | tr -d '\r')
+
+    post_provision_attest_wo_docker "$cas_addr:$cas_client_port"
+    upload_post_provisioning_sessions_wo_docker "$cas_name" "$namespace" "$TARGET_DIR" "$policy_name" "$cas_addr" "$cas_client_port" "$scone_cli_mrenclave"
+    enable_post_provisioning_features_wo_docker "$cas_name" "$namespace" "$TARGET_DIR" "$policy_name"
+}
+
+function post_provision_attest_wo_docker() {
+    local cas_addr="$1"
+
+    scone cas attest "$SGX_TOLERATIONS" "$cas_addr" || scone cas attest "$SGX_STD_TOLERATIONS" "$cas_addr" || error_exit "ERROR: Attestation of CAS at $cas_addr failed - exiting"
+    scone cas set-default "$cas_addr"
+}
+
+function add_cas_db_info_to_owner_identity_file_wo_docker() {
+    local host_prefix="$1"
+    local identity_dir="$2"
+    local identity_rel_file_loc="$3"
+    local cas_name="$4"
+    local cas_namespace="$5"
+    local cas_addr="$6"
+    local cas_client_port="$7"
+
+    if [[ "$host_prefix" == "" ]]; then
+        error_exit "Internal error: host_prefix empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$identity_dir" == "" ]]; then
+        error_exit "Internal error: identity_dir empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$identity_rel_file_loc" == "" ]]; then
+        error_exit "Internal error: identity_rel_file_loc empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$cas_namespace" == "" ]]; then
+        error_exit "Internal error: cas_namespace empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$cas_addr" == "" ]]; then
+        error_exit "Internal error: cas_addr empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$cas_client_port" == "" ]]; then
+        error_exit "Internal error: cas_client_port empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+
+    local success=1
+    local host_file_loc="$host_prefix/$identity_dir/$identity_rel_file_loc"
+    SCONE_CLI_CONFIG="$host_file_loc" scone cas attest $SGX_TOLERATIONS $cas_addr:$cas_client_port >& /dev/null  || success=0
+    SCONE_CLI_CONFIG="$host_file_loc" scone cas set-default $cas_addr:$cas_client_port >& /dev/null || success=0
+
+    if [[ "$success" == 0 ]]; then
+        SCONE_CLI_CONFIG="$host_file_loc" scone cas attest $SGX_STD_TOLERATIONS $cas_addr:$cas_client_port >& /dev/null  || { echo ERROR: Attestation of CAS $cas_name in namespace $cas_namespace failed - exiting ; exit 1; }
+        SCONE_CLI_CONFIG="$host_file_loc" scone cas set-default $cas_addr:$cas_client_port >& /dev/null
+    fi
+
+    attest_result=$(cat $host_file_loc | jq ".cas_db.\"$cas_addr:$cas_client_port\"")
+    if [[ "$attest_result" == null ]]; then
+        echo "failed to add attestation for $cas_addr:$cas_client_port"
+        return 1
+    fi
+    local configured_cas_client_port=$(kubectl get cas $cas_name -n $cas_namespace -o jsonpath='{.spec.service.clientPort}')
+    local file_content=$(sed "s/$cas_addr:$cas_client_port/$cas_name.$cas_namespace:$configured_cas_client_port/" "$host_file_loc")
+    echo "$file_content" >  "$host_file_loc"
+}
+
+function get_owner_identity_for_policy_upload_wo_docker() {
+    local source_owner_identity_file_loc="$1"
+    local cas_name="$2"
+    local cas_namespace="$3"
+    local cas_addr="$4"
+    local cas_client_port="$5"
+    if [[ "$source_owner_identity_file_loc" == "" ]]; then
+        error_exit "Internal Error: source_owner_identity_file_loc is empty in get_owner_identity_for_policy_upload_wo_docker"
+    fi
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal Error: cas_name is empty in get_owner_identity_for_policy_upload_wo_docker"
+    fi
+    if [[ "$cas_namespace" == "" ]]; then
+        error_exit "Internal Error: cas_namespace is empty in get_owner_identity_for_policy_upload_wo_docker"
+    fi
+    if [[ "$cas_addr" == "" ]]; then
+        error_exit "Internal Error: cas_addr is empty in get_owner_identity_for_policy_upload_wo_docker"
+    fi
+    if [[ "$cas_client_port" == "" ]]; then
+        error_exit "Internal Error: cas_client_port is empty in get_owner_identity_for_policy_upload_wo_docker"
+    fi
+    local upload_identity_rel_file_loc="owner_id_${cas_name}_${cas_name}.json"
+    local upload_owner_identity_file_loc="$TARGET_DIR/identity/$upload_identity_rel_file_loc"
+
+    extract_owner_identity_content "$source_owner_identity_file_loc" > "$upload_owner_identity_file_loc"
+    if [[ ! -f "$base_owner_identity_file_loc" ]]; then
+        # We save it for next time. Just in case...
+        cp "$upload_owner_identity_file_loc" "$base_owner_identity_file_loc"
+    fi
+    add_cas_db_info_to_owner_identity_file_wo_docker "$TARGET_DIR" "identity" "$upload_identity_rel_file_loc" "$cas_name" "$cas_namespace" "$cas_addr" "$cas_client_port" || error_exit "Could not attest CAS $cas_name in namespace $cas_namespace"
+    sed 's/^/          /' "$upload_owner_identity_file_loc"
+}
+
+
+function upload_post_provisioning_sessions_wo_docker() {
+    local cas_name="$1"
+    local namespace="$2"
+    local target_dir="$3"
+    local policy_name="$4"
+    local cas_addr="$5"
+    local cas_client_port="$6"
+    local scone_cli_mrenclave="$7"
+
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$namespace" == "" ]]; then
+        error_exit "Internal error: namespace was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$target_dir" == "" ]]; then
+        error_exit "Internal error: target_dir was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$policy_name" == "" ]]; then
+        error_exit "Internal error: policy_name was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$cas_addr" == "" ]]; then
+        error_exit "Internal error: cas_addr was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$cas_client_port" == "" ]]; then
+        error_exit "Internal error: cas_client_port was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$scone_cli_mrenclave" == "" ]]; then
+        error_exit "Internal error: scone_cli_mrenclave was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+
+    local owner_identity
+    verbose "Create owner-identity file for backup-controller policy"
+
+    local source_owner_identity_file_loc="$post_provisioning_owner_identity"
+    local default_owner_identity_file_loc="$TARGET_DIR/identity/config.json"
+    local base_owner_identity_file_loc="$TARGET_DIR/$BASE_OWNER_IDENTITY_FILE_REL_LOC"
+
+    if [[ "$source_owner_identity_file_loc" == "" ]]; then
+        if [[ -f "$default_owner_identity_file_loc" ]]; then
+            source_owner_identity_file_loc=$default_owner_identity_file_loc
+        elif [[ -f "$base_owner_identity_file_loc" ]]; then
+            source_owner_identity_file_loc=$base_owner_identity_file_loc
+        else
+            error_exit "Could not find the owner-identity file of the CAS $SVCNAME in namespace $NAMESPACE. You can specify the file using the $post_provisioning_owner_identity_flag flag, or create one at the default location ($default_owner_identity_file_loc) by attesting the CAS."
+        fi
+    fi
+    verbose "    - Using owner-identity file $source_owner_identity_file_loc"
+
+    owner_identity=$(get_owner_identity_for_policy_upload_wo_docker "$source_owner_identity_file_loc" "$cas_name" "$namespace" $cas_addr $cas_client_port) || error_exit "Could not extract the owner-identity to be used when uploading the backup-controller session"
+    cas_owner_policy_file="$target_dir/identity/cas-owner-session-$cas_name-$namespace.yaml"
+    download_file "$CAS_OWNER_POLICY_URL" "$cas_owner_policy_file"
+
+    fn_policy_name=$(make_string_ok_for_filename $policy_name)
+    backup_policy="$TARGET_DIR/identity/backup-controller-session-$fn_policy_name.yaml"
+    backup_policy_template="${backup_policy}.template"
+    set_platform_ids
+    download_file "$CAS_BACKUP_POLICY_URL" "$backup_policy_template"
+
+    POLICY_NAME="$policy_name" SCONE_CLI_MRENCLAVE="$scone_cli_mrenclave" OWNER_IDENTITY=$owner_identity envsubst '$POLICY_NAME,${POLICY_NAME},$SCONE_CLI_MRENCLAVE,${SCONE_CLI_MRENCLAVE},$OWNER_IDENTITY,${OWNER_IDENTITY}' < "$backup_policy_template" > "$backup_policy"
+
+    verbose "Creating Backup Policy $policy_name for CAS $cas_name in namespace $namespace (see file $backup_policy)"
+
+    provisioned_policy="$target_dir/identity/provisioned.yaml"
+    cat > "$provisioned_policy" <<EOF
+name: provisioned
+version: "0.3.10"
+predecessor:
+
+access_policy:
+  read:
+    - ANY
+  update:
+    - CREATOR
+  create_sessions:
+    - CREATOR
+EOF
+
+    set -e
+    export SCONE_MODE=auto
+    scone session create "$cas_owner_policy_file"
+    scone session create "$backup_policy"
+    scone session create "$provisioned_policy"
+    echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}'
+    scone cas show-identification -c 
+    echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}'
+    scone cas show-identification -s
+    echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'
+    scone cas show-identification --session-encryption-key
+}
+
+function enable_post_provisioning_features_wo_docker() {
+    # todo: next version - use encrypted policy and upload encrypted policy
+    local cas_name="$1"
+    local namespace="$2"
+    local target_dir="$3"
+    local policy_name="$4"
+
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name was empty in enable_post_provisioning_features_wo_docker"
+    fi
+    if [[ "$namespace" == "" ]]; then
+        error_exit "Internal error: namespace was empty in enable_post_provisioning_features_wo_docker"
+    fi
+    if [[ "$target_dir" == "" ]]; then
+        error_exit "Internal error: target_dir was empty in enable_post_provisioning_features_wo_docker"
+    fi
+    if [[ "$policy_name" == "" ]]; then
+        error_exit "Internal error: policy_name was empty in enable_post_provisioning_features_wo_docker"
+    fi
+
+    kubectl get cas $cas_name  --namespace "$namespace"
+
+    local patch_file="$target_dir/owner-config/cas-$namespace-$cas_name-$VERSION-patch.json"
+    local patch_template_file="${patch_file}.template"
+
+    local patch_file_url=""
+    if [[ $NO_BACKUP -eq 1 ]]; then
+        patch_file_url=$CAS_PATCH_PROBES_JSON_URL
+    else
+        patch_file_url=$CAS_PATCH_PROBES_AND_BACKUP_JSON_URL
+    fi
+
+    verbose "Patching CAS CR $cas_name in namespace $namespace (template patch file: $patch_file_url, final patch file: $patch_file)"
+    download_file $patch_file_url $patch_template_file
+    IMAGE_PREFIX="$IMAGE_PREFIX" IMAGE_REPO="$IMAGE_REPO" VERSION="$VERSION" POLICY_NAME="$policy_name" envsubst '${IMAGE_PREFIX},$IMAGE_PREFIX,${IMAGE_REPO},$IMAGE_REPO,${VERSION},$VERSION,${POLICY_NAME},$POLICY_NAME' < "$patch_template_file" > "$patch_file"
+    kubectl patch cas $cas_name --namespace $namespace --type='json' --patch-file=$patch_file
+
+    if [[ $do_wait_for_healthy == 1 ]]; then
+        wait_for_resource_phase "cas" "$cas_name" "$namespace" "HEALTHY"
+    fi
+
+    export cas_manifest="$target_dir/owner-config/cas-${namespace}-${cas_name}-${VERSION}-manifest.yaml"
+    verbose "Creating manifest '$cas_manifest' for setting up CAS"
+    kubectl get cas $cas_name -n $namespace -o yaml > $cas_manifest
+
+    verbose "The manifest of CAS '$cas_name' in namespace '$namespace' is stored in $cas_manifest"
+    verbose "  - You can modify the metadata and spec fields of the manifest and apply the changes with 'kubectl apply -f \"$cas_manifest\""
+    verbose "The owner identity of CAS '$cas_name' in namespace '$namespace' is stored in directory \"$target_dir/identity\""
+
+    verbose "Done"
+    exit 0
+}
+
 SERVICE_PID=0
 help_flag="--help"
 ns_flag="--namespace"
@@ -1430,7 +2067,11 @@ force_flag="--force"
 upgrade_flag="--upgrade"
 no_provisioning="--preprovision-only"
 post_provisioning_flag="--postprovision-only"
-post_provisioning_owner_config_flag="--postprovision-owner-config"
+post_provisioning_owner_identity_flag="--postprovision-owner-identity"
+no_image_signature_check_flag="--no-image-signature-check"
+no_docker_flag="--no-docker"
+scone_cas_addr_flag="--cas-address"
+cas_client_port_flag="--cas-client-port"
 
 unset SNAPSHOT
 verify_sign_key_flag="--verify-image-signatures"
@@ -1459,7 +2100,10 @@ do_vault_upgrade=0
 export do_wait_for_healthy=0
 do_preprovision=0
 do_postprovision=0
-post_provisioning_owner_config=""
+do_docker=1
+scone_cas_addr=""
+post_provisioning_owner_identity=""
+do_check_image_signatures=1
 
 export OWNER_FILE=""
 export VAULT_CAS="cas"
@@ -1672,6 +2316,17 @@ usage ()
     echo "                  provided, and this option is ignored."
     echo "    $wait_for_healthy_flag"
     echo "                  Wait for SVC to become healthy before returning."
+    echo "    $no_image_signature_check_flag"
+    echo "                  Disable checking the image signatures"
+    echo "    $no_docker_flag"
+    echo "                  Disable the use of docker. Requires running in on a computer with SCONE cli installed."
+    echo "    $scone_cas_addr_flag <SCONE_CAS_ADDR>"
+    echo "                  Use SCONE_CAS_ADDR as ip address or hostname to connect to the CAS, e.g., when attesting."
+    echo "                  Requires running on a computer with SCONE cli installed."
+    echo "                  Default value: NAME.NAMESPACE"
+    echo "    $cas_client_port_flag <CAS_CLIENT_PORT>"
+    echo "                  The port to use when connecting to the CAS client port, e.g., when attesting."
+    echo "                  Default value: the client port of the CAS or $DEFAULT_CAS_CLIENT_PORT for non-existing CASes"
     echo "    $no_provisioning"
     echo "                  It starts the CAS to a point at which one can inject a database key."
     echo "    $post_provisioning_flag"
@@ -1680,8 +2335,8 @@ usage ()
     echo "                  -  enable startup probe, liveness probe, and backup-controller."
     echo "                  NOTE: The use of this flag assumes the cas has already been provisioned (although"
     echo "                  it has not yet been marked as provisioned)."
-    echo "    $post_provisioning_owner_config_flag <OWNER-CONFIG>"
-    echo "                  Perform the post-provisioning steps on the CAS with the provided owner-config file."
+    echo "    $post_provisioning_owner_identity_flag <OWNER-CONFIG>"
+    echo "                  Perform the post-provisioning steps on the CAS with the provided owner-identity file."
     echo "                  Requires $post_provisioning_flag"
     echo "    $help_flag"
     echo "                  Output this usage information and exit."
@@ -1919,6 +2574,10 @@ while [[ "$#" -gt 0 ]]; do
             do_backup=1;
             shift || true # past value
             ;;
+        $no_image_signature_check_flag)
+            do_check_image_signatures=0;
+            shift || true # past value
+            ;;
         $no_provisioning)
             do_preprovision=1;
             shift || true # past value
@@ -1927,11 +2586,33 @@ while [[ "$#" -gt 0 ]]; do
             do_postprovision=1;
             shift || true # past value
             ;;
-        $post_provisioning_owner_config_flag)
-            post_provisioning_owner_config=$2;
-            if [ ! -e "${post_provisioning_owner_config}" ]; then
+        $no_docker_flag)
+            do_docker=0;
+            shift || true # past value
+            ;;
+        $scone_cas_addr_flag)
+            scone_cas_addr=$2;
+            if [[ "${scone_cas_addr}" == "" ]]; then
                 usage
-                error_exit "Error: Please specify a valid owner-config file ('$post_provisioning_owner_config' does not exist)."
+                error_exit "Error: Please specify a valid SCONE_CAS_ADDR ('$scone_cas_addr' is not valid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        $cas_client_port_flag)
+            CAS_CLIENT_PORT=$2;
+            if [[ "${CAS_CLIENT_PORT}" == "" ]]; then
+                usage
+                error_exit "Error: Please specify a valid CAS_CLIENT_PORT ('$CAS_CLIENT_PORT' is not valid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        $post_provisioning_owner_identity_flag)
+            post_provisioning_owner_identity=$2;
+            if [ ! -e "${post_provisioning_owner_identity}" ]; then
+                usage
+                error_exit "Error: Please specify a valid owner-identity file ('$post_provisioning_owner_identity' does not exist)."
             fi
             shift # past argument
             shift || true # past value
@@ -2001,8 +2682,8 @@ if [[ "${SVC}" == "vault" ]]; then
     fi
 fi
 
-if [[ $do_postprovision == 0 && "$post_provisioning_owner_config" != "" ]] ; then
-    error_exit "The $post_provisioning_owner_config_flag flag requires the $post_provisioning_flag"
+if [[ $do_postprovision == 0 && "$post_provisioning_owner_identity" != "" ]] ; then
+    error_exit "The $post_provisioning_owner_identity_flag flag requires the $post_provisioning_flag"
 fi
 
 if ! kubectl get namespace "$NAMESPACE" > /dev/null 2>/dev/null
@@ -2035,10 +2716,32 @@ if [[ "${SVC}" == "vault" ]]; then
     fi
 fi
 
-check_prerequisites
-check_port_forward
-check_image_signatures
+verbose "Checking if CAS '$NAME' in namespace '$NAMESPACE' already exists"
+export IMAGE=""
+EXISTS=1  JSON=$(kubectl get cas "$NAME" --namespace "$NAMESPACE" -o json 2>/dev/null) || EXISTS=0
 
+if [[ "$CAS_CLIENT_PORT" == "" ]]; then
+    if [[ $EXISTS == 1 ]] ; then
+        CAS_CLIENT_PORT=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.spec.service.clientPort}')
+        verbose "Using the client port of the existing CAS. CAS_CLIENT_PORT: $CAS_CLIENT_PORT"
+    else
+        CAS_CLIENT_PORT=$DEFAULT_CAS_CLIENT_PORT
+        verbose "Using the default CAS client port. CAS_CLIENT_PORT: $CAS_CLIENT_PORT"
+    fi
+else
+    verbose "Using the user supplied CAS client port. CAS_CLIENT_PORT: $CAS_CLIENT_PORT"
+fi
+
+check_prerequisites
+if [[ $do_docker == 1 ]]; then
+    check_port_forward
+fi
+if [[ $do_check_image_signatures == 1 ]]; then
+    if [[ $do_docker == 0 ]]; then
+        error_exit "You have chosen the default behaviour of checking the signatures of the docker images used. This however requires docker which has been turned off ($no_docker_flag). Either remove the $no_docker_flag flag or use the $no_image_signature_check_flag flag additionally."
+    fi
+    check_image_signatures
+fi
 
 if [[ "${SVC}" == "vault" ]]; then
     if [[ "$image_overwrite" != "" ]]; then
@@ -2187,7 +2890,8 @@ then
         verbose "Enabling Port-Forwarding to $NAME in namespace $NAMESPACE"
         check_port_forward
         cas_svc_port_forward
-        export SCONE_CAS_ADDR="host.docker.internal"
+
+        export SCONE_CAS_ADDR="host.docker.internal:$CAS_ENCLAVE_PORT"
 
         verbose "Reading Session $POLICY_NAME from CAS $NAME in namespace $NAMESPACE"
 
@@ -2197,6 +2901,7 @@ then
             -v "$TARGET_MOUNT_DIR"/identity:/identity \
             -e SCONE_CLI_CONFIG="/identity/config.json" \
             -e SCONE_CAS_ADDR="$SCONE_CAS_ADDR" \
+            -e CAS_CLIENT_PORT="$CAS_CLIENT_PORT" \
             -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
             -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
             -e SCONE_NO_TIME_THREAD=1 \
@@ -2207,7 +2912,7 @@ then
             -e SCONE_MODE="sim" \
             -e NAME="$NAME" \
             ${SCONECLI_IMAGE} \
-            sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default $SCONE_CAS_ADDR  ;   scone session read $POLICY_NAME > /identity/session.tmp ;  HASH=`scone session verify /identity/session.tmp` ; echo HASH=$HASH ; sed -i "s/^predecessor: .*\$/predecessor: ${HASH}/g" /identity/session.tmp ; sed -i "s/${OLD_SCONE_CLI_MRENCLAVE}/${SCONE_CLI_MRENCLAVE}/g" /identity/session.tmp ; scone session update /identity/session.tmp'
+            sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal:$CAS_CLIENT_PORT  ;   scone session read $POLICY_NAME > /identity/session.tmp ;  HASH=`scone session verify /identity/session.tmp` ; echo HASH=$HASH ; sed -i "s/^predecessor: .*\$/predecessor: ${HASH}/g" /identity/session.tmp ; sed -i "s/${OLD_SCONE_CLI_MRENCLAVE}/${SCONE_CLI_MRENCLAVE}/g" /identity/session.tmp ; scone session update /identity/session.tmp'
 
         if [[ $SERVICE_PID != 0 ]] ; then
             verbose "Shutting down port-forwarding"
@@ -2316,10 +3021,10 @@ fi
 
 if [[ "${SVC}" == "vault" ]]; then
     verbose "checking whether Vault $VAULT_NAME already exists in namespace $VAULT_NAMESPACE"
-    EXISTS=1
-    kubectl get vault "$VAULT_NAME" --namespace "$VAULT_NAMESPACE" &>/dev/null || EXISTS=0
+    VAULT_EXISTS=1
+    kubectl get vault "$VAULT_NAME" --namespace "$VAULT_NAMESPACE" &>/dev/null || VAULT_EXISTS=0
     if [[ $do_verify == 1 ]] ; then
-        if [[ $EXISTS == 1 ]] ; then
+        if [[ $VAULT_EXISTS == 1 ]] ; then
             verbose "verifying Vault $VAULT_NAME in namespace $VAULT_NAMESPACE"
             verify_vault
             exit 0
@@ -2329,7 +3034,7 @@ if [[ "${SVC}" == "vault" ]]; then
     fi
 
     if [[ $do_create_policy == 1 ]] ; then
-        if [[ $EXISTS == 1 ]] ; then
+        if [[ $VAULT_EXISTS == 1 ]] ; then
             verbose "creating Vault client policy for Vault $VAULT_NAME in namespace $VAULT_NAMESPACE"
             create_vault_policy
             if [[ $SERVICE_PID != 0 ]] ; then
@@ -2342,7 +3047,7 @@ if [[ "${SVC}" == "vault" ]]; then
         fi
     fi
 
-    if [[ $EXISTS != 0 ]] ; then
+    if [[ $VAULT_EXISTS != 0 ]] ; then
         error_exit "The vault CR '$VAULT_NAME' already exists in namespace '$VAULT_NAMESPACE'. We currently do not support re-provisioning an existing vault."
     fi
 else
@@ -2358,14 +3063,22 @@ else
     fi
 fi
 
-verbose "Checking if CAS '$NAME' in namespace '$NAMESPACE' already exists"
+if [[ $do_preprovision == 1 ]]; then
+     create_unprovisioned_cas "$NAME" "$NAMESPACE" "$VERSION" "$TARGET_DIR" "$CAS_PROVISIONING_URL"
+     exit 0
+fi
 
-export IMAGE=""
-EXISTS=1  JSON=$(kubectl get cas "$NAME" --namespace "$NAMESPACE" -o json 2>/dev/null) || EXISTS=0
+if [[ $do_postprovision == 1 && $do_docker == 0 ]]; then
+     provision_unprovisioned_cas_wo_docker "$NAME" "$NAMESPACE" "$scone_cas_addr"
+     exit 0
+fi
 
 if [[ $EXISTS == 1 ]] ; then
     if [[ $do_postprovision == 1 ]] ; then
         verbose "We only perform the post-provisioning steps."
+        if [[ $do_docker == 0 ]]; then
+            error_exit "Internal error: This requires docker but docker is turned off. Instead use provision_unprovisioned_cas_wo_docker"
+        fi
         post_provisioning
         exit 0
     fi
@@ -2407,7 +3120,6 @@ if [[ $EXISTS == 1 ]] ; then
         fi
     fi
 else
-
     if [[ $do_postprovision == 1 ]] ; then
         error_exit "The $post_provisioning_flag flag requires the CAS to exist. No CAS $NAME found in namespace $NAMESPACE"
     fi
@@ -2490,7 +3202,7 @@ if [[ $EXISTS == 0 || "${SVC}" == "cas" ]] ; then
         verbose "Retrieving CAS_KEY_HASH AND CAS_PROVISIONING_TOKEN from log of pod '$POD' in namespace '$NAMESPACE'"
 
         RETRY=20
-        until kubectl logs $POD --namespace "$NAMESPACE" | grep "CAS key hash" > /dev/stderr
+        until kubectl logs $POD --namespace "$NAMESPACE" -c cas | grep "CAS key hash" > /dev/stderr
         do
             sleep 5
             verbose "Waiting for CAS key"
@@ -2500,11 +3212,11 @@ if [[ $EXISTS == 0 || "${SVC}" == "cas" ]] ; then
             fi
         done
 
-        CAS_KEY_HASH=$(kubectl logs "$POD"  --namespace "$NAMESPACE" | grep "CAS key hash" | awk '{ print $NF } ')
+        CAS_KEY_HASH=$(kubectl logs "$POD"  --namespace "$NAMESPACE" -c cas | grep "CAS key hash" | awk '{ print $NF } ')
         export CAS_KEY_HASH=$(echo "$CAS_KEY_HASH" | tail -1 )
 
         RETRY=50
-        until kubectl logs $POD --namespace "$NAMESPACE" | grep "CAS provisioning token"  > /dev/stderr
+        until kubectl logs $POD --namespace "$NAMESPACE" -c cas | grep "CAS provisioning token"  > /dev/stderr
         do
             sleep 5
             verbose "Waiting for CAS provisioning token: $POD in namespace $NAMESPACE"
@@ -2514,7 +3226,7 @@ if [[ $EXISTS == 0 || "${SVC}" == "cas" ]] ; then
             fi
         done
 
-        export CAS_PROVISIONING_TOKEN=$(kubectl logs "$POD"  --namespace "$NAMESPACE" | grep "CAS provisioning token" | awk ' { print $NF } ')
+        export CAS_PROVISIONING_TOKEN=$(kubectl logs "$POD"  --namespace "$NAMESPACE" -c cas | grep "CAS provisioning token" | awk ' { print $NF } ')
 
         if [[ "$CAS_PROVISIONING_TOKEN" == "" ]] ; then
             if [[ $EXISTS == 0 || "${SVC}" == "cas" ]] ; then
@@ -2609,7 +3321,8 @@ EOF
             -e SCONE_CLI_CONFIG="/identity/config.json" \
             -e CAS_KEY_HASH="$CAS_KEY_HASH" \
             -e CAS_PROVISIONING_TOKEN="$CAS_PROVISIONING_TOKEN" \
-            -e SCONE_CAS_ADDR="host.docker.internal" \
+            -e SCONE_CAS_ADDR="host.docker.internal:$CAS_ENCLAVE_PORT" \
+            -e CAS_CLIENT_PORT="$CAS_CLIENT_PORT" \
             -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
             -e POLICY_NAME="$POLICY_NAME" \
             -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
@@ -2617,7 +3330,9 @@ EOF
             -e SCONE_NO_TIME_THREAD=1 \
             -e SCONE_PRODUCTION=0 \
             -e SCONE_MODE="sim" \
-            ${SCONECLI_IMAGE} sh -c 'scone cas provision host.docker.internal -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_TOLERATIONS || scone cas provision host.docker.internal -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_STD_TOLERATIONS || { echo "Provisioning failed - checking if it is already provisioned!" ; scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "Provisioning of CAS failed! FATAL ERROR: please ensure that you use a CAS that permits DB-Key injection or correct SGX_TOLERATIONS to SGX_STD_TOLERATIONS" ; exit 1 ; else  echo "CAS is already provisioned" ; fi } '
+            ${SCONECLI_IMAGE} sh -c 'scone cas provision host.docker.internal:$CAS_CLIENT_PORT -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_TOLERATIONS || scone cas provision host.docker.internal:$CAS_CLIENT_PORT -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_STD_TOLERATIONS || { echo "Provisioning failed - checking if it is already provisioned!" ; scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "Provisioning of CAS failed! FATAL ERROR: please ensure that you use a CAS that permits DB-Key injection or correct SGX_TOLERATIONS to SGX_STD_TOLERATIONS" ; exit 1 ; else  echo "CAS is already provisioned" ; fi } '
+
+#            ${SCONECLI_IMAGE} sh -c 'scone cas provision host.docker.internal:$CAS_CLIENT_PORT -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_TOLERATIONS && scone cas set-default host.docker.internal:$CAS_CLIENT_PORT || scone cas provision host.docker.internal:$CAS_CLIENT_PORT -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_STD_TOLERATIONS && scone cas set-default host.docker.internal:$CAS_CLIENT_PORT || { echo "Provisioning failed - checking if it is already provisioned!" ; scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "Provisioning of CAS failed! FATAL ERROR: please ensure that you use a CAS that permits DB-Key injection or correct SGX_TOLERATIONS to SGX_STD_TOLERATIONS" ; exit 1 ; else  echo "CAS is already provisioned" ; fi } '
 
         upload_post_provisioning_sessions
     fi
@@ -2632,7 +3347,7 @@ if [ "$SVC" == "vault" ] ; then
     export VERIFIER_MRENCLAVE=$(docker run --platform linux/amd64 --pull always --rm --entrypoint="" -e SCONE_HASH=1 -e SCONE_HEAP=1G -e SCONE_ALLOW_DLOPEN=1 $VAULT_VERIFIER_IMAGE vault-statement-verifier |tr -d '\r')
 
     export OWNER_ID=$RANDOM$RANDOM
-    export CLUSTER_SCONE_CAS_ADDR="$SVCNAME.$NAMESPACE"
+    export CLUSTER_SCONE_CAS_ADDR="$SVCNAME.$NAMESPACE:$CAS_ENCLAVE_PORT"
 
 
     export REVIEW_SECRET=$(kubectl get secrets -n kube-system | grep default | awk '{ print $1 }')
@@ -2679,7 +3394,7 @@ if [ "$SVC" == "vault" ] ; then
         -e REVIEWER_JWT="$REVIEWER_JWT" \
         -e K8S_HOST="$K8S_HOST" \
         -e K8S_CA_CERT="$K8S_CA_CERT" \
-        -e SCONE_CAS_ADDR="host.docker.internal" \
+        -e SCONE_CAS_ADDR="host.docker.internal:$CAS_ENCLAVE_PORT" \
         -e CLUSTER_SCONE_CAS_ADDR="$CLUSTER_SCONE_CAS_ADDR" \
         -e CAS_CLIENT_PORT="$CAS_CLIENT_PORT" \
         -e VERIFIER_MRENCLAVE="$VERIFIER_MRENCLAVE" \
@@ -2694,7 +3409,7 @@ if [ "$SVC" == "vault" ] ; then
         -e SCONE_PRODUCTION=0 \
         -e SCONE_MODE="sim" \
         ${SCONECLI_IMAGE} \
-        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }   && scone cas set-default host.docker.internal && export SCONE_CAS_ADDR=\$CLUSTER_SCONE_CAS_ADDR && export OWNER=\$(scone self show-key-hash) && PREDECESSOR=\~ CAS_POLICY_NAMESPACE= scone session create --use-env /policies/vault-image-mrenclaves.yaml && scone session create --use-env /policies/session.yaml && scone session create --use-env /policies/verify.yaml"
+        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }   && scone cas set-default host.docker.internal:$CAS_CLIENT_PORT && export SCONE_CAS_ADDR=\$CLUSTER_SCONE_CAS_ADDR && export OWNER=\$(scone self show-key-hash) && PREDECESSOR=\~ CAS_POLICY_NAMESPACE= scone session create --use-env /policies/vault-image-mrenclaves.yaml && scone session create --use-env /policies/session.yaml && scone session create --use-env /policies/verify.yaml"
 
     export vault_manifest="$TARGET_DIR/owner-config/vault-$VAULT_NAMESPACE-$VAULT_NAME-manifest.yaml"
 
