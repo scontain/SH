@@ -42,7 +42,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0"
+export K_PROVISION_VERSION="5.8.1-rc.1"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -1055,7 +1055,8 @@ else
     EXPECTED_IMAGE="${IMAGE_REPO}/${IMAGE_PREFIX}las:$VERSION"
 
     verbose "LAS uses image $LAS_IMAGE and we expect image $EXPECTED_IMAGE"
-    if [[ "$EXPECTED_IMAGE" != "$LAS_IMAGE" ]] ; then
+    if [[ "$EXPECTED_IMAGE" != "$LAS_IMAGE" || "$DCAP_KEY" != ""  ]] ; then
+        verbose "Updating LAS image to $EXPECTED_IMAGE or updating DCAP_KEY"
         download_file "$LAS_MANIFEST" ".las-manifest.template"
 
         envsubst < ".las-manifest.template" > ".las-manifest.yaml"
