@@ -26,7 +26,7 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.0"
+export K_PROVISION_VERSION="5.8.1-rc.1"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -40,7 +40,7 @@ export NC='\e[0m' # No Color
 
 export SCONTAIN_IMAGE_REPO="registry.scontain.com/scone.cloud"
 export DEFAULT_MANIFESTS_URL="https://raw.githubusercontent.com/scontain/manifests/main"
-export DEFAULT_DCAP_KEY="aecd5ebb682346028d60c36131eb2d92"
+export DEFAULT_DCAP_KEY="00000000000000000000000000000000"
 export DEFAULT_CAS_CLIENT_PORT=8081
 export CAS_CLIENT_PORT=""
 # TODO: Set CAS_ENCLAVE_PORT the same way as CAS_CLIENT_PORT
@@ -1280,7 +1280,18 @@ function enable_post_provisioning_features() {
     verbose "Patching CAS CR $NAME in namespace $NAMESPACE (template patch file: $patch_file_url, final patch file: $patch_file)"
     download_file $patch_file_url $patch_template_file
     SCONE="\$SCONE" envsubst < "$patch_template_file" > "$patch_file"
-    kubectl patch cas $NAME --namespace $NAMESPACE --type='json' --patch-file=$patch_file
+
+    local retry=5
+    until kubectl patch cas $NAME --namespace $NAMESPACE --type='json' --patch-file=$patch_file
+    do
+        verbose "Patch failed - retrying"
+        sleep 1
+        retry=$((retry - 1))
+        if [[ $retry == 0 ]] ; then
+            error_exit "Cannot kubectl patch cas $NAME --namespace $NAMESPACE --type='json' --patch-file=$patch_file
+. Bailing."
+        fi
+    done
 
     export cas_manifest="$TARGET_DIR/owner-config/cas-${NAMESPACE}-${NAME}-${VERSION}-manifest.yaml"
     verbose "Creating manifest '$cas_manifest' for setting up CAS"
@@ -1559,21 +1570,6 @@ function retrieve_cas_json() {
     echo $cas_json
 }
 
-function get_backup_controller_pod_name() {
-    local cas_name
-    local namespace
-    cas_name="$1"
-    namespace="$2"
-    backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
-    num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l)
-    while [[ "$num_backup_controller_pods" != "1" ]]; do
-        sleep 1
-        backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$name -n $namespace -o name)
-        num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l)
-    done
-    echo $backup_controller_name
-}
-
 function wait_for_grep_in_cas_pod_log() {
     local cas_name="$1"
     local namespace="$2"
@@ -1650,12 +1646,12 @@ function get_backup_controller_pod_name() {
     local namespace
     cas_name="$1"
     namespace="$2"
-    backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
-    num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l)
+    backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=bc,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+    num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l | sed 's/^[[:space:]]*//g')
     while [[ "$num_backup_controller_pods" != "1" ]]; do
         sleep 1
-        backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$name -n $namespace -o name)
-        num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l)
+        backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=bc,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+        num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l | sed 's/^[[:space:]]*//g')
     done
     echo $backup_controller_name
 }
@@ -2013,7 +2009,18 @@ function enable_post_provisioning_features_wo_docker() {
     verbose "Patching CAS CR $cas_name in namespace $namespace (template patch file: $patch_file_url, final patch file: $patch_file)"
     download_file $patch_file_url $patch_template_file
     IMAGE_PREFIX="$IMAGE_PREFIX" IMAGE_REPO="$IMAGE_REPO" VERSION="$VERSION" POLICY_NAME="$policy_name" envsubst '${IMAGE_PREFIX},$IMAGE_PREFIX,${IMAGE_REPO},$IMAGE_REPO,${VERSION},$VERSION,${POLICY_NAME},$POLICY_NAME' < "$patch_template_file" > "$patch_file"
-    kubectl patch cas $cas_name --namespace $namespace --type='json' --patch-file=$patch_file
+
+    local retry=5
+    until kubectl patch cas $cas_name --namespace $namespace --type='json' --patch-file=$patch_file
+    do
+        verbose "Patch failed - retrying"
+        sleep 1
+        retry=$((retry - 1))
+        if [[ $retry == 0 ]] ; then
+            error_exit "Cannot patch kubectl patch cas $cas_name --namespace $namespace --type='json' --patch-file=$patch_file. Bailing."
+        fi
+    done
+
 
     if [[ $do_wait_for_healthy == 1 ]]; then
         wait_for_resource_phase "cas" "$cas_name" "$namespace" "HEALTHY"
@@ -2960,7 +2967,7 @@ then
         sleep 1
         new_backup_controller_name=$(get_backup_controller_pod_name "$NAME" "$NAMESPACE")
     done
-    num_schedulable_and_capable_nodes=$(kubectl get nodes --field-selector spec.unschedulable=false -o name|xargs -n 1 kubectl get --show-labels | grep -e "sgx.intel.com/capable=true"|wc -l)
+    num_schedulable_and_capable_nodes=$(kubectl get nodes --field-selector spec.unschedulable=false -o name|xargs -n 1 kubectl get --show-labels | grep -e "sgx.intel.com/capable=true" | wc -l | sed 's/^[[:space:]]*//g')
     expected_migration="$num_schedulable_and_capable_nodes/$num_schedulable_and_capable_nodes"
     verbose "The name of the backup-controller pod has changed. Let's wait for the new one to have $expected_migration registered backups."
 
@@ -3279,7 +3286,7 @@ if [[ $EXISTS == 0 || "${SVC}" == "cas" ]] ; then
         verbose "Provisioning service 'cas': NAME = '$NAME' in namespace '$NAMESPACE' using DCAP-API Key '$DCAP_KEY'"
 
         if [[ "$DCAP_KEY" == "$DEFAULT_DCAP_KEY" ]] ; then
-          warning  "No DCAP API Key specified! Using default - this is not recommended for production!"
+          warning  "No DCAP API Key specified! Using default - this only recommended if you use a self-serving LAS (i.e., a cloud with a DCAP caching service!"
         fi
 
         if [[ "$WEBHOOK" != "" ]] ; then
