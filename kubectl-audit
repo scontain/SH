@@ -26,7 +26,7 @@ Copyright (C) 2022-2023 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.8.1-rc.1"
+export K_PROVISION_VERSION="5.8.0"
 
 export RED='\e[31m'
 export BLUE='\e[34m'
