@@ -1055,7 +1055,8 @@ else
     EXPECTED_IMAGE="${IMAGE_REPO}/${IMAGE_PREFIX}las:$VERSION"
 
     verbose "LAS uses image $LAS_IMAGE and we expect image $EXPECTED_IMAGE"
-    if [[ "$EXPECTED_IMAGE" != "$LAS_IMAGE" ]] ; then
+    if [[ "$EXPECTED_IMAGE" != "$LAS_IMAGE" || "$DCAP_KEY" != ""  ]] ; then
+        verbose "Updating LAS image to $EXPECTED_IMAGE or updating DCAP_KEY"
         download_file "$LAS_MANIFEST" ".las-manifest.template"
 
         envsubst < ".las-manifest.template" > ".las-manifest.yaml"
