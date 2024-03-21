@@ -21,7 +21,7 @@ INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE T
 OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE
 WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
 
-Copyright (C) 2022 scontain.com
+Copyright (C) 2022-2023 scontain.com
 '
 
 : '
@@ -42,7 +42,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
 set -e
 
-export K_PROVISION_VERSION="5.8.1-rc.1"
+export K_PROVISION_VERSION="5.8.1"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -98,7 +98,7 @@ else
 fi
 
 if [[ "$CERT_MANAGER" == "" ]] ; then
-    CERT_MANAGER="https://github.com/cert-manager/cert-manager/releases/download/v1.10.1/cert-manager.yaml"
+    CERT_MANAGER="https://github.com/cert-manager/cert-manager/releases/download/v1.12.4/cert-manager.yaml"
 else
     warning "Using external CERT_MANAGER=$CERT_MANAGER"
 fi
@@ -811,7 +811,7 @@ do
     export CM=`kubectl get pods -A | grep cert-manager | grep Running | wc -l | sed 's/^[[:space:]]*//g'`
     if [[ $CM == "0" ]] ; then
         warning "cert-manager is not running - trying to start cert manager"
-        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.10.1/cert-manager.yaml
+        kubectl apply -f "$CERT_MANAGER"
         warning "waiting 5 seconds before checking again"
         sleep 5
     else
@@ -859,7 +859,8 @@ verbose "Checking SCONE Operator"
 INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.chart | startswith("scone-operator-"))' | jq '(.chart |  ltrimstr("scone-operator-"))' | tr -d '"')
 
 verbose "Installed version of the operator controller is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
-if [[ $UPDATE == 1 && "$INSTALLED_VERSION" != "$VERSION" ]] ; then
+if [[ $UPDATE == 1 ]] ; then
+  if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
     verbose "  Updating the SCONE Operator: helm upgrade --install scone-operator $HELM_CHART --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE"
 
     download_file "$HELM_CHART" "scone-operator.tgz"
@@ -878,6 +879,9 @@ if [[ $UPDATE == 1 && "$INSTALLED_VERSION" != "$VERSION" ]] ; then
     sleep 30
     # sometime controller does not restart .. let's make sure it does
     kubectl rollout restart deployment -n $NAMESPACE scone-controller-manager
+  else
+    verbose "The installed version of the SCONE Operator is already '$VERSION' - no need to update."
+  fi
 fi
 
 if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
