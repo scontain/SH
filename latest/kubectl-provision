@@ -21,17 +21,18 @@ INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE T
 OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE
 WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
 
-Copyright (C) 2022-2023 scontain.com
+Copyright (C) 2022-2024 scontain.com
 '
 
 set -e
 
-export K_PROVISION_VERSION="5.8.1-rc.1"
+export K_PROVISION_VERSION="5.8.1"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
 export K_ISVPRODID="41316"
 export K_ISVSVN="5"
+export K_PROVISION_MAX_RETRIES=${K_PROVISION_MAX_RETRIES:-100000}
 
 export RED='\e[31m'
 export BLUE='\e[34m'
@@ -179,7 +180,7 @@ function verify_image() {
     if [[ "$cosign_public_key_file" == "" ]]; then
         create_cosign_verification_key
     fi
-    cosign verify --key "$cosign_public_key_file" "$image_name" >/dev/null 2> /dev/null || error_exit "Failed to verify signature of image '$image_name'! Exiting! Please check that 'cosign version' shows a git version >= 2.0.0."
+    cosign verify --key "$cosign_public_key_file" "$image_name" >/dev/null 2> /dev/null || error_exit "Failed to verify signature of image '$image_name'! Exiting! Please check that 'cosign version' shows a git version >= 2.0.0. Also ensure that there is no field 'credsStore' in '$HOME/.docker/config.json'"
     verbose "  verification was successful"
 }
 
@@ -1647,10 +1648,17 @@ function get_backup_controller_pod_name() {
     cas_name="$1"
     namespace="$2"
     backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=bc,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+    if [[ "$backup_controller_name" == "" ]]; then 
+        backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+    fi
+    
     num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l | sed 's/^[[:space:]]*//g')
     while [[ "$num_backup_controller_pods" != "1" ]]; do
         sleep 1
         backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=bc,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+        if [[ "$backup_controller_name" == "" ]]; then 
+            backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+        fi
         num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l | sed 's/^[[:space:]]*//g')
     done
     echo $backup_controller_name
@@ -2313,6 +2321,9 @@ usage ()
     echo "                  1. Update the policy of the backup controller (requires owner credentials)"
     echo "                  2. Upgrade the backup controller by updating the CAS custom resource manifest."
     echo "                  3. Upgrade the CAS service by updating the CAS image."
+    echo "                  Note: You need to set the version to the current version of CAS that you want to upgrade."
+    echo "                  Example: "
+    echo "                  DCAP_KEY="YOUR-API-KEY" kubectl provision cas my-cas --set-version 5.8.0 --no-image-signature-check --upgrade 5.8.1-rc.1"
     echo "    $force_flag"
     echo "                  Use force when:"
     echo "                  - performing an upgrade of an unhealthy CAS"
@@ -2372,7 +2383,7 @@ usage ()
     echo "  - CAS_BACKUP_POLICY_URL=\"$CAS_BACKUP_POLICY_URL\""
     echo "  - SGX_TOLERATIONS=\"$SGX_TOLERATIONS\""
     echo "  - SGX_STD_TOLERATIONS=\"$SGX_STD_TOLERATIONS\""
-
+    echo "  - K_PROVISION_MAX_RETRIES=\"$K_PROVISION_MAX_RETRIES\""
 }
 
 
@@ -2845,11 +2856,16 @@ then
     EXPECTED_IMAGE="$CAS_IMAGE"
     NEXT_IMAGE="$CAS_UPGRADE_IMAGE"
 
-    if [[ "$IMAGE" != "$EXPECTED_IMAGE"  ]] ; then
-        if [[ $use_force == 0 ]]; then
-            error_exit "Expected CAS Image '$EXPECTED_IMAGE' but retrieved  '$IMAGE'. We only support CAS upgrade for expected image versions - exiting! "
+    if [[ "$IMAGE" != "$EXPECTED_IMAGE" ]] ; then
+        if [[ "$IMAGE" == "$CAS_RECOVERY_IMAGE" ]] ; then
+            warning "CAS runs recovery image: $CAS_RECOVERY_IMAGE"
+            export EXPECTED_IMAGE="$CAS_RECOVERY_IMAGE"
+        else
+            if [[ $use_force == 0 ]]; then
+                error_exit "Expected CAS Image '$EXPECTED_IMAGE' but retrieved  '$IMAGE'. We only support CAS upgrade for expected image versions - exiting! "
+            fi
+            warning "Performing forced upgrade of cas $NAME in namespace $NAMESPACE. Continuing although its current image is not the expected. Current: $IMAGE. Expected: $EXPECTED_IMAGE."
         fi
-        warning "Performing forced upgrade of cas $NAME in namespace $NAMESPACE. Continuing although its current image is not the expected. Current: $IMAGE. Expected: $EXPECTED_IMAGE."
     fi
 
     verbose "Checking if CAS is healthy"
@@ -3122,12 +3138,15 @@ if [[ $EXISTS == 1 ]] ; then
             export IMAGE="$image_overwrite"
             EXPECTED_IMAGE="$image_overwrite"
         fi
-    else
-        EXPECTED_IMAGE="$CAS_IMAGE"
     fi
     if [[ "$IMAGE" != "$EXPECTED_IMAGE"  ]] ; then
         if [[ "${SVC}" == "cas" ]] ; then
-            error_exit "Expected CAS Image '$EXPECTED_IMAGE' but retrieved  '$IMAGE' - exiting! I cannot change the image. Consider to change the version with ${version_flag}. Alternatively, you can set the image with option ${image_flag}."
+            if [[ "$IMAGE" == "$CAS_RECOVERY_IMAGE" ]] ; then
+                warning "CAS runs recovery image: $CAS_RECOVERY_IMAGE"
+                export EXPECTED_IMAGE="$CAS_RECOVERY_IMAGE"
+            else
+                error_exit "Expected CAS Image '$EXPECTED_IMAGE' or '$CAS_RECOVERY_IMAGE' but retrieved  '$IMAGE' - exiting! I cannot change the image. Consider to change the version with ${version_flag}. Alternatively, you can set the image with option ${image_flag}."
+            fi
         fi
     fi
 else
@@ -3212,7 +3231,7 @@ if [[ $EXISTS == 0 || "${SVC}" == "cas" ]] ; then
     if [[ "$is_prov" == "no" ]]; then
         verbose "Retrieving CAS_KEY_HASH AND CAS_PROVISIONING_TOKEN from log of pod '$POD' in namespace '$NAMESPACE'"
 
-        RETRY=20
+        RETRY=$K_PROVISION_MAX_RETRIES
         until kubectl logs $POD --namespace "$NAMESPACE" -c cas | grep "CAS key hash" > /dev/stderr
         do
             sleep 5
@@ -3226,7 +3245,7 @@ if [[ $EXISTS == 0 || "${SVC}" == "cas" ]] ; then
         CAS_KEY_HASH=$(kubectl logs "$POD"  --namespace "$NAMESPACE" -c cas | grep "CAS key hash" | awk '{ print $NF } ')
         export CAS_KEY_HASH=$(echo "$CAS_KEY_HASH" | tail -1 )
 
-        RETRY=50
+        RETRY=$K_PROVISION_MAX_RETRIES
         until kubectl logs $POD --namespace "$NAMESPACE" -c cas | grep "CAS provisioning token"  > /dev/stderr
         do
             sleep 5
@@ -3273,7 +3292,7 @@ if [[ $EXISTS == 0 || "${SVC}" == "cas" ]] ; then
         kubectl exec -it $POD -- bash restart-cas 2> .tmp.x 1> .tmp.y || echo "Restart initiated."
         # todo: check if new CAS is up by checking the CAS_KEY and waiting until we can query the CAS keys
         verbose "Waiting for CAS to be restarted... will take 60 seconds."
-        sleep 60
+        wait_for_resource_phase "cas" "$NAME" "$NAMESPACE" "HEALTHY"
         HASH=$(session_hash "provisioned" "$NAME")
         verbose "HASH is '$HASH'"
         sleep 5
