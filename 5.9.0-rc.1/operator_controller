@@ -1,0 +1,1185 @@
+#!/usr/bin/env bash
+
+: '
+Access to this file is granted under the SCONE COMMERCIAL LICENSE V1.0
+
+Any use of this product using this file requires a commercial license from scontain UG, www.scontain.com.
+
+Permission is also granted  to use the Program for a reasonably limited period of time  (but no longer than 1 month)
+for the purpose of evaluating its usefulness for a particular purpose.
+
+THERE IS NO WARRANTY FOR THIS PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN OTHERWISE STATED IN WRITING
+THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM PROVE DEFECTIVE,
+YOU ASSUME THE COST OF ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
+
+IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED ON IN WRITING WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MAY
+MODIFY AND/OR REDISTRIBUTE THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL,
+INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM INCLUDING BUT NOT LIMITED TO LOSS
+OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE
+WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+Copyright (C) 2022-2024 scontain.com
+'
+
+: '
+The `operator_controller` script deploys, reconciles, or updates the SCONE operator
+
+One should always use the latest version of this script. Via environment variables, one can customize the
+script to install from different docker and git repos. The environment variables can be defined before calling
+this script or by providing a config file $CONFIG_FILE (default is "operator_controller_config").
+
+ - VERSION: it installs the "latest" version of the operator unless you define environment variable VERSION
+ - REGISTRY: by default it uses registry "registry.scontain.com" to pull the operator unless you define env variable REGISTRY
+ - MANIFESTS: by default we pull from  "https://raw.githubusercontent.com/scontain/manifests/main/$VERSION" - the manifests are VERSIONed
+ - SCRIPTS: by default we pull from  "https://raw.githubusercontent.com/scontain/SH/main/$VERSION" - the scripts are VERSIONed
+ - CHART: by default we pull the chart from  "https://raw.githubusercontent.com/scontain/operator/main/" 
+    - the charts are VERSIONed: scone-operator-$VERSION.tgz
+    - the images used in the CHART are versioned but we overwrite the image with $REGISTRY/scone.cloud/k8soperators:$VERSION
+'
+
+set -e
+
+export K_PROVISION_VERSION="5.9.0-rc.1"
+export RED='\e[31m'
+export BLUE='\e[34m'
+export ORANGE='\e[33m'
+export NC='\e[0m' # No Color
+
+
+function verbose () {
+    if [[ $V -eq 1 ]]; then
+        echo -e "${BLUE}- $@${NC}"  >/dev/stderr
+    fi
+}
+
+function warning () {
+    echo -e "${ORANGE}WARNING: $@${NC}"  >/dev/stderr
+}
+
+function error_exit() {
+  trap '' EXIT
+  echo -e "${RED}$1${NC}"   >/dev/stderr
+  exit 1
+}
+
+# print an error message on an error exit
+trap 'last_command=$current_command; current_command=$BASH_COMMAND' DEBUG
+trap 'if [ $? -ne 0 ]; then echo -e "${RED}\"${last_command}\" command failed - exiting.${NC}" ; fi' EXIT
+
+# CONFIG SECTION - some configuration options only be changed via environment variables (and not yet via command line flags)
+
+export DCAP_KEY=""
+
+if [[ "$CONFIG_FILE" == "" ]] ; then
+    CONFIG_FILE="operator_controller_config"
+else
+    warning "Using external CONFIG_FILE=$CONFIG_FILE"
+fi
+
+
+# NOTE: verbose will only show up if you execute with "V=1 ./operator_controller" 
+source "$CONFIG_FILE" 2>/dev/null || verbose "Note: could not load config file \"$CONFIG_FILE\" - Ignoring."
+
+#
+# VERSION: all components 
+#
+#  latest   # default: install the latest version - right now this would be 5.8.0
+#  5.8.0    # specific: version of the operator to install
+#
+
+
+if [[ "$VERSION" == "" ]] ; then
+    export VERSION="$K_PROVISION_VERSION"
+else
+    warning "Using external VERSION=$VERSION"
+fi
+
+if [[ "$CERT_MANAGER" == "" ]] ; then
+    CERT_MANAGER="https://github.com/cert-manager/cert-manager/releases/download/v1.15.2/cert-manager.yaml"
+else
+    warning "Using external CERT_MANAGER=$CERT_MANAGER"
+fi
+
+if [[ "$DEFAULT_NAMESPACE" == "" ]] ; then
+    DEFAULT_NAMESPACE="scone-system"
+else
+    warning "Using external DEFAULT_NAMESPACE=$DEFAULT_NAMESPACE"
+fi
+
+if [[ "$REGISTRY" == "" ]] ; then
+    export REGISTRY="registry.scontain.com"
+else
+    warning "Using external REGISTRY=$REGISTRY"
+fi
+
+# definitions related to secret operator (not recommended for production)
+
+if [[ "$IMPS_HELM_CHART" == "" ]] ; then
+    IMPS_HELM_CHART="banzaicloud-stable/imagepullsecrets"
+else
+    warning "Using external IMPS_HELM_CHART=$IMPS_HELM_CHART"
+fi
+
+if [[ "$IMPS_HELM_REPO" == "" ]] ; then
+    IMPS_HELM_REPO="banzaicloud-stable https://kubernetes-charts.banzaicloud.com"
+else
+    warning "Using external IMPS_HELM_REPO=$IMPS_HELM_REPO"
+fi
+
+export SCONTAIN_IMAGE_REPO="registry.scontain.com/scone.cloud"
+
+if [[ "$IMAGE_REPO" == "" ]] ; then
+    export IMAGE_REPO="$SCONTAIN_IMAGE_REPO"
+else
+    warning "Using external IMAGE_REPO=$IMAGE_REPO"
+fi
+
+#
+# Public Key used to sign manifests
+#
+
+SIGNER="5BCAD31DCC8D5D722B7B7ABD2EBE04E7CC816D32"
+
+
+#
+# verify signed manifests
+#
+
+function verify_file() {
+    file=$1
+
+    if [[ "$gpg_public_key_file" == "" ]]; then
+        create_gpg_verification_key
+    fi
+    LC_ALL=en_US.UTF-8 gpg --no-default-keyring --keyring $gpg_public_key_file --verify --status-fd=1 "$file.asc" "$file" 2> /dev/null | grep -e " VALIDSIG $SIGNER" >/dev/null
+}
+
+# download/copy files
+#
+# Arguments:  url, output
+#
+# - url:
+#   - **remote file**  starts with https://
+#   - **local file** does NOT start with https://
+# - output:
+#   - file location to store or copy the file
+#
+# This function download remote files and verify signature.
+# This function copies local files, i.e., does NOT verify any signatures.
+#
+
+function download_file() {
+    url="$1"
+    output="$2"
+
+    verbose "  Downloading $url"
+    if [[ "$url" == https://* ]] ; then
+        curl -fsSL "$url"  -o "$output" || error_exit "Failed to download file $url."
+        curl -fsSL "$url.asc"  -o "${output}.asc" || error_exit "Failed to download signature file $url.asc."
+    else
+        cat $url > "$output" || error_exit "Failed to read local file $url"
+        cat "${url}.asc" > "${output}.asc" || true
+    fi
+    if [[ "$url" == https://raw.githubusercontent.com/scontain* ]]; then
+        verbose "  Verifying signature of $url"
+        verify_file "$output" || error_exit "Signature of file '$file' is incorrect"
+    else
+        # we try to verify also in this case since it might be a local scontain file with valid signature
+        verify_file "$output" || warning "  Skipping signature verification for $url, due to unknown origin."
+    fi
+}
+
+#
+# create a file with the public key of the signer key for all scone.cloud images
+#
+
+function create_cosign_verification_key() {
+    export cosign_public_key_file="$(mktemp).pub"
+    cat > $cosign_public_key_file <<EOF
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAErLf0HT8xZlLaoX5jNN8aVL1Yrs+P
+wS7K6tXeRlWLlUX1GeEtTdcuhZMKb5VUNaWEJW2ZU0YIF91D93dCZbUYpw==
+-----END PUBLIC KEY-----
+EOF
+}
+
+#
+# create a file with the public key of scontain gpg signer key
+#
+
+function create_gpg_verification_key() {
+    local tmp_gpg
+
+    export gpg_public_key_file="$(mktemp)-pub.gpg"
+    tmp_gpg="${gpg_public_key_file}.base64"
+
+    cat > $tmp_gpg <<EOF
+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
+EOF
+    cat "$tmp_gpg" | base64 -d > $gpg_public_key_file
+}
+
+#
+# verify that a container image was properly signed by Scontain
+#
+
+function verify_image() {
+    local image_name
+    local version
+    local image
+    image_name="$1"
+    version="$2"
+
+    if [[ "$image_name" == "" ]]; then
+        error_exit "The name of the image for which we should verify the signature, was empty. Exiting."
+    fi
+    if [[ "$version" == "" ]]; then
+        error_exit "The version of the image for which we should verify the signature, was empty. Exiting."
+    fi
+
+    image="$IMAGE_REPO/${IMAGE_PREFIX}$image_name:$version"
+    if [[ ( "$IMAGE_REPO" != "$SCONTAIN_IMAGE_REPO" || "$IMAGE_PREFIX" != "" ) && "$cosign_public_key_file" == "" ]]; then
+        warning "Skipping image verification of image '$image' since the public key is unknown (the key can be specified with $verify_sign_key_flag)"
+        return
+    fi
+
+    verbose "Verifying the signature of image '$image'"
+    docker pull "$image"
+    if [[ "$cosign_public_key_file" == "" ]]; then
+        create_cosign_verification_key
+    fi
+    cosign verify --key "$cosign_public_key_file" "$image" >/dev/null 2> /dev/null || error_exit "Failed to verify signature of image '$image'! Exiting! Please check that 'cosign version' shows a git version >= 2.0.0."
+    verbose "  verification was successful"
+}
+
+
+function check_prerequisites() {
+    exit_msg=""
+    verbose "Checking that we have access to kubectl"
+    if ! command -v kubectl &> /dev/null
+    then
+        exit_msg="Command 'kubectl' not found!"
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install 'kubectl'- see https://kubernetes.io/docs/tasks/tools/${NC}"
+    fi
+
+    verbose "Checking that we have access to helm"
+    if ! command -v helm &> /dev/null
+    then
+        exit_msg="Command 'helm' not found!"
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install  'helm' - see https://helm.sh/docs/intro/install/${NC}"
+    fi
+
+    verbose "Checking that we have access to jq"
+    if ! command -v jq &> /dev/null
+    then
+        exit_msg="Command 'jq' not found!"
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install 'jq'- see https://stedolan.github.io/jq/manual/${NC}"
+    fi
+
+    verbose "Checking that you have access to a Kubernetes cluster."
+    if ! kubectl get pods &> /dev/null
+    then
+        echo -e "${RED}It seems that you do not have access to a Kubernetes cluster!${NC}"
+        echo -e "- ${ORANGE}Please ensure that you have access to a Kubernetes cluster${NC}"
+        exit_msg="No access to Kubernetes cluster!"
+    fi
+
+    verbose "Checking if the docker daemon is running locally"
+
+    if ! docker ps &> /dev/null > /dev/null
+    then
+        echo -e "${RED}It seems that the docker daemon is not running!${NC}"
+        echo -e "- ${ORANGE}Please ensure that the docker daemon is running${NC}"
+        exit_msg="No access to local docker daemon!"
+    else
+        verbose "Checking that we have local access to container images repo $IMAGE_REPO."
+
+        Fixit=0
+        export PULL_IMAGE="$IMAGE_REPO/k8soperators:$VERSION"
+        docker pull "$PULL_IMAGE" 2>/dev/null || Fixit=2
+
+        if [[ $Fixit != 0 ]] ; then
+            warning "No access to images repo $IMAGE_REPO: cannot pull image $PULL_IMAGE"
+            if [[ $PLUGIN == 0 || $ACCOUNT_INFO == 0 ]] ; then
+                warning "set flags $deploy_plugin_flag $fix_flag to ensure that we fix locally pull container images"
+                exit_msg="Cannot access repo $IMAGE_REPO."
+            else
+                echo "$REGISTRY_ACCESS_TOKEN" | docker login --username "$REGISTRY_USERNAME" --password-stdin "$IMAGE_REPO" || error_exit "Login into repo $IMAGE_REPO failed. Please check credentials!"
+                docker pull "$PULL_IMAGE" >/dev/null || exit_msg="We cannot pull image $PULL_IMAGE - please check the credentials and the Image name!"
+            fi
+        fi
+    fi
+
+    if [[ "$exit_msg" != "" ]] ; then
+        error_exit "$exit_msg"
+    fi
+}
+
+# Function to check webhook exists as validating and mutating webhook
+
+function wait_for_validating_webook {
+    local WEBHOOK_NAME="$1"
+    local NAMESPACE="$2"
+
+    # Wait for the webhook-related deployment to be ready
+    while [[! kubectl get validatingwebhookconfigurations.admissionregistration.k8s.io "$WEBHOOK_NAME" -n "$NAMESPACE" 2> /dev/null ]]; do
+        verbose "Waiting for validating webhook $WEBHOOK_NAME in namespace $NAMESPACE to be ready..."
+        sleep 10
+    done
+
+    verbose "Validating webhook $WEBHOOK_NAME is ready."
+}
+
+function wait_for_mutating_webook {
+    local WEBHOOK_NAME="$1"
+    local NAMESPACE="$2"
+
+    # Wait for the webhook-related deployment to be ready
+    while [[! kubectl get mutatingwebhookconfigurations.admissionregistration.k8s.io "$WEBHOOK_NAME" -n "$NAMESPACE" 2> /dev/null ]]; do
+        verbose "Waiting for mutating webhook $WEBHOOK_NAME in namespace $NAMESPACE to be ready..."
+        sleep 10
+    done
+
+    verbose "$WEBHOOK_NAME is ready."
+}
+
+# Functions to fix state
+
+# USE default external namespace manifest -> which has $namespace
+
+function check_namespace {
+    NAMESPACE=$1
+    verbose "  Checking namespace $NAMESPACE"
+
+    if ! kubectl get namespace "$NAMESPACE" > /dev/null 2>/dev/null
+    then
+        warning "  Namespace '$NAMESPACE' does not exist."
+        if [[ $FIX == 1 ]] ; then
+            namespace_manifest=".ns.yaml"
+            verbose " Creating namespace '$NAMESPACE' - enabling automatic pull secret injection"
+            verbose "   Creating manifest '$namespace_manifest'"
+            cat >"$namespace_manifest"  <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $NAMESPACE
+  labels:
+    name: scone-system
+  annotations:
+    scone-operator/inject-pull-secret:  "true"
+    sconeapps/inject-pull-secret:  "true"
+EOF
+
+            kubectl apply -f "$namespace_manifest"
+        fi
+    else
+        verbose "  Namespace '$NAMESPACE' already exist - no updating/fixing"
+    fi
+}
+
+
+function check_secret {
+    secret="$1"
+    namespace="$2"
+
+    if [[ $UPDATE == 1 &&  "$REGISTRY_USERNAME" != "" ]] ; then
+        verbose "  Updating secret $secret"
+        if [[ $SECRET_OPERATOR == 1 ]] ; then
+            verbose "  Temporarily deleting automatic injection of $secret - to avoid that new secret is autmatically overwritten by old secret"
+            kubectl delete ImagePullSecret $secret || verbose "Deleting of ImagePullSecret $secret failed - ignoring." 
+        fi
+        # deletion of ImagePullSecret sometimes removes the secret .. if secrets operator already runs
+        # Hence, we delete secret - just to be sure.
+        kubectl delete secret $secret --namespace "$namespace" || verbose "As expected, deleting secret $secret in namespace $namespace failed."
+        kubectl create secret docker-registry --dry-run=client -o yaml "$secret" --docker-server="$REGISTRY" --docker-username="$REGISTRY_USERNAME"  --docker-password="$REGISTRY_ACCESS_TOKEN"  --docker-email="$REGISTRY_EMAIL" --namespace "$namespace" |  kubectl create -f - ; 
+        # and we reenable the pushing of this image
+        if [[ $SECRET_OPERATOR == 1 ]] ; then
+            verbose "  Re-enabling injection of secret $secret"
+            kubectl apply -f $SECRET_OPERATOR_MANIFEST
+        fi
+    fi
+    if ! kubectl get secret "$secret" -n "$namespace" > /dev/null 2>/dev/null
+    then
+        warning "Secret '$secret' does not exist in namespace '$namespace'."
+        if [[ $FIX == 1 ]] ; then
+            verbose "  Fixing/Updating secret $secret"
+            if [[ "$REGISTRY_USERNAME" == "" ]] ; then
+                warning "You need to specify $user_flag, $token_flag, and $email_flag!"
+                warning "CANNOT fix the secret $secret"
+            else
+                kubectl create secret docker-registry "$secret" --docker-server="$REGISTRY" --docker-username="$REGISTRY_USERNAME"  --docker-password="$REGISTRY_ACCESS_TOKEN"  --docker-email="$REGISTRY_EMAIL" --namespace "$namespace"
+            fi
+        fi
+    else
+        verbose "  Secret '$secret' already exists in namespace '$namespace'."
+    fi
+}
+
+function set_urls() {
+    export SCONTAIN_OPERATOR_CHART="https://raw.githubusercontent.com/scontain/operator/main/scone-operator-$VERSION.tgz"
+    export SCONTAIN_SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/sgxplugin.yaml"
+    export SCONTAIN_LAS_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/las.yaml"
+
+    if [[ "$HELM_CHART" == "" ]] ; then
+        HELM_CHART="$SCONTAIN_OPERATOR_CHART"
+    else
+        warning "Using external HELM_CHART=$HELM_CHART"
+    fi
+
+    if [[ "$LAS_MANIFEST" == "" ]] ; then
+        LAS_MANIFEST=$SCONTAIN_LAS_MANIFEST
+    else
+        warning "Using external LAS_MANIFEST=$LAS_MANIFEST"
+    fi
+
+    if [[ "$SGXPLUGIN_MANIFEST" == "" ]] ; then
+        SGXPLUGIN_MANIFEST="$SCONTAIN_SGXPLUGIN_MANIFEST"
+    else
+        warning "Using external SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
+    fi
+
+    if [[ "$KUBECTLPLUGIN" == "" ]] ; then
+        KUBECTLPLUGIN="https://raw.githubusercontent.com/scontain/SH/master/$VERSION/kubectl-provision"
+    else
+        warning "Using external KUBECTLPLUGIN=$KUBECTLPLUGIN"
+    fi
+
+    if [[ "$SECRET_OPERATOR_MANIFEST" == "" ]] ; then
+        SECRET_OPERATOR_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/secrets_operator.yaml"
+    else
+        warning "Using external SECRET_OPERATOR_MANIFEST=$SECRET_OPERATOR_MANIFEST"
+    fi
+
+    verbose "Checking that you have access to cosign."
+    if ! cosign version &> /dev/null
+    then
+        echo -e "${RED}It seems that you do not have access to cosign!${NC}"
+        echo -e "- ${ORANGE}Please install 'cosign'- see https://docs.sigstore.dev/cosign/installation/${NC}"
+        error_exit "No access to cosign. Please install: https://docs.sigstore.dev/cosign/installation."
+    fi
+}
+
+
+function wait_for_cmd_success() {
+    local cmd
+    cmd=$1
+    echo -n "Waiting for $cmd to succeed... "
+    timeout 120 bash -c "until $cmd &>/dev/null ; do sleep 0.5; done"
+    echo "OK"
+}
+
+#
+help_flag="--help"
+ns_flag="--namespace"
+ns_short_flag="-n"
+fix_flag="--reconcile"
+fix_short_flag="-r"
+cr_flag="--create"
+cr_short_flag="-c"
+update_flag="--update"
+update_short_flag="-u"
+verbose_flag="--verbose"
+verbose_short_flag="-v"
+verbose=""
+owner_flag="--owner-config"
+owner_short_flag="-o"
+verbose=""
+debug_flag="--debug"
+debug_short_flag="-d"
+debug=""
+user_flag="--username"
+token_flag="--access-token"
+email_flag="--email"
+deploy_plugin_flag="--plugin"
+deploy_only_plugin_flag="--only-plugin"
+plugin_flag="--plugin-path"
+secret_operator_flag="--secret-operator"
+version_flag="--set-version"
+print_version_flag="--version"
+only_controller_flag="--only-operator"
+no_sgxplugin="--no-sgxplugin"
+verify_sign_key_flag="--verify-image-signatures"
+dcap_flag="--dcap-api"
+dcap_short_flag="-d"
+node_selector_flag="--node-selector"
+
+NAMESPACE="$DEFAULT_NAMESPACE"
+repo="$APP_IMAGE_REPO"
+create_ns=""
+
+FIX=0  # Default only check - do not fix
+UPDATE=0
+
+SVC=""
+NAME=""
+REGISTRY_USERNAME=""
+REGISTRY_ACCESS_TOKEN=""
+REGISTRY_EMAIL=""
+PLUGIN=0
+SECRET_OPERATOR=0
+ONLY_OPERATOR=0
+ONLY_PLUGIN=0
+RUN_SGXPLUGIN=1
+export NODESELECTOR="# nodeSelector:"
+export NODESELECTORKEY="# no node selector specified - SGXPlugin runs on all nodes"
+
+# find directory on path where we are permitted to copy the plugin to
+
+PLUGINBIN=`which kubectl-provision` || { PLUGINBIN="" ; for p in ${PATH//:/ } ; do
+        if [[ -w "$p" ]] ; then
+            PLUGINBIN="$p/kubectl-provision"
+        fi
+    done
+}
+
+usage ()
+{
+  echo ""
+  echo "Usage:"
+  echo "  operator_controller [OPTIONS]"
+  echo ""
+  echo "Objectives:"
+  echo "  - Checks if the SCONE operator and all its dependencies are available."
+  echo "  - Tries to fix any issues it discovers if flag '$fix_flag' is set."
+  echo "  - Tries to update all components in case flag '$update_flag' is set (even if everything is ok)."
+  echo "  - Creates a namespace for a service if flag $cr_flag NAMESPACE is set."
+  echo "  - If the $verify_sign_key_flag is provided, or if the Scontain container image repository"
+  echo "    is used, the signatures of the images used are verified."
+  echo ""
+  echo ""
+  echo "Options:"
+  echo "    $fix_flag | $fix_short_flag"
+  echo "                  Try to fix all warnings that we discover."
+  echo "                  The default is to warn about potential issues only."
+  echo "    $update_flag | $update_short_flag"
+  echo "                  Try to update all dependencies of the SCONE operator."
+  echo "                  independently if they need fixing."
+  echo "    $ns_short_flag | $ns_flag NAMESPACE"
+  echo "                  The Kubernetes namespace in which the SCONE operator should be deployed on the cluster."
+  echo "                  Default value: \"$DEFAULT_NAMESPACE\""
+  echo "    $cr_short_flag | $cr_flag NAMESPACE"
+  echo "                  Create namespace \"NAMESPACE\" for provisioning SCONE CAS (or another service)."
+  echo "    $user_flag REGISTRY_USERNAME"
+  echo "                  To create/update/fix the pull secrets ('sconeapps' and 'scone-operator-pull'), "
+  echo "                  one needs to specify the user name, access token, and email of the registry."
+  echo "                  Signup for an account: https://sconedocs.github.io/registry/"
+  echo "    $token_flag REGISTRY_ACCESS_TOKEN"
+  echo "                  The access token of the pull secret."
+  echo "    $email_flag REGISTRY_EMAIL"
+  echo "                  The email address belonging to the pull secret."
+  echo "    $deploy_plugin_flag"
+  echo "                  Include the 'kubectl provision' in the reconciliation and updates."
+  echo "    $deploy_only_plugin_flag"
+  echo "                  Deploy 'kubectl provision' and exit."
+  echo "    $plugin_flag PATH"
+  echo "                  Path where we should write the kubectl plugin binary. The path must be writeable."
+  echo "                  Default value: \"$PLUGINBIN\""
+  echo "                  The prefix of the default value is the last path on your shell \$PATH that is writeable. "
+  echo "                  If none is writeable and you set $deploy_plugin_flag, you must specify $plugin_flag PATH."
+  echo "    $secret_operator_flag"
+  echo "                  Check/Reconcile/Update the Secret Operator (used to inject Kubernetes Secrets into Kubernetes namespaces)"
+  echo "    $only_controller_flag"
+  echo "                  Only install the SCONE Operator (but no LAS, SGXPlugin, kubectl plugin)"
+  echo "    $verbose_short_flag | $verbose_flag"
+  echo "                  Enable verbose output"
+  echo "    $debug_flag | debug_short_flag"
+  echo "                  Create debug image instead of a production image"
+  echo "    $version_flag VERSION"
+  echo "                  Set the version of the helm chart"
+  echo "    $verify_sign_key_flag PUBLIC_KEY_PATH"
+  echo "                  Path to the public key to use for verification of signed images."
+  echo "                  For the verification of signed images in the $SCONTAIN_IMAGE_REPO"
+  echo "                  repository, the public key does not need to be provided, and this"
+  echo "                  option is ignored."
+  echo "    $dcap_flag | $dcap_short_flag <DCAP API Key>"
+  echo "                  DCAP API Key - required if no PCKCert Caching service is used."
+  echo "                  NOTE that LAS HEALTH CHECKS are INCOMPLETE in case this is not specified."
+  echo "    $no_sgxplugin" 
+  echo "                  Set this flag in case you do not want to install the SGXPlugin."
+  echo "    $node_selector_flag  <NODE SELECTOR>"
+  echo "                  The SGX Plugin will run, by default, on run on all nodes to grant containers"  
+  echo "                  access to the SGX device. You can use this flag to limit the SGX Plugin to a subset"
+  echo "                  of the nodes. For example, if SGX enabled nodes are already labeled, we could set" 
+  echo "                  $node_selector_flag  'intel.feature.node.kubernetes.io/sgx: \"true\"'"
+  echo "    $help_flag"
+  echo "                  Output this usage information and exit."
+  echo ""
+  echo "Default Configuration: "
+  echo "  - CERT_MANAGER=$CERT_MANAGER"
+  echo "  - DEFAULT_NAMESPACE=$DEFAULT_NAMESPACE"
+  echo "  - HELM_CHART=$HELM_CHART"
+  echo "  - LAS_MANIFEST=$LAS_MANIFEST"
+  echo "  - SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
+  echo "  - REGISTRY=$REGISTRY"
+  echo "  - IMAGE_REPO=$IMAGE_REPO"
+  echo "  - KUBECTLPLUGIN=$KUBECTLPLUGIN"
+  echo "  - SECRET_OPERATOR_MANIFEST=$SECRET_OPERATOR_MANIFEST"
+  echo "  - IMPS_HELM_CHART=$IMPS_HELM_CHART"
+  echo "  - IMPS_HELM_REPO=$IMPS_HELM_REPO"
+  echo "  - VERSION=$VERSION"
+  echo "You can overwrite the defaults by exporting these environment variables before executing this script."
+}
+
+##### Parsing arguments
+
+while [[ "$#" -gt 0 ]]; do
+  case $1 in
+    ${dcap_flag} | ${dcap_short_flag})
+      export DCAP_KEY="$2"
+      if [ ! -n "${DCAP_KEY}" ]; then
+        usage
+        error_exit "Error: Please specify a valid DCAP_KEY ('$DCAP_KEY' is invalid)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${ns_flag} | ${ns_short_flag})
+      NAMESPACE="$2"
+      if [ ! -n "${NAMESPACE}" ]; then
+        usage
+        error_exit "Error: The namespace '$NAMESPACE' is invalid."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${cr_flag} | ${cr_short_flag})
+      create_ns="$2"
+      if [ ! -n "${create_ns}" ]; then
+        usage
+        error_exit "Error: The namespace '$create_ns' is invalid."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${plugin_flag})
+      PLUGINBIN="$2"
+      if [ ! -n "${PLUGINBIN}" ]; then
+        usage
+        error_exit "Error: Please specify a valid kubectl plugin path ('$PLUGINBIN' is invalid)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${node_selector_flag})
+      export NODESELECTOR="$2"
+      if [ ! -n "${NODESELECTOR}" ]; then
+        usage
+        error_exit "Error: Please specify a valid node selector ('$NODESELECTOR' is invalid)."
+      fi
+      export NODESELECTORKEY="nodeSelector:"
+
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${user_flag})
+      REGISTRY_USERNAME="$2"
+      if [ ! -n "${REGISTRY_USERNAME}" ]; then
+        usage
+        error_exit "Error: Please specify a valid REGISTRY USERNAME ('$REGISTRY_USERNAME' is invalid)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${token_flag})
+      REGISTRY_ACCESS_TOKEN="$2"
+      if [ ! -n "${REGISTRY_ACCESS_TOKEN}" ]; then
+        usage
+        error_exit "Error: Please specify a valid REGISTRY ACCESS TOKEN ('$REGISTRY_ACCESS_TOKEN' is invalid)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${version_flag})
+      export VERSION="$2"
+      if [ ! -n "${VERSION}" ]; then
+        usage
+        error_exit "Error: Please specify a valid VERSION ('$VERSION' is invalid)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${email_flag})
+      REGISTRY_EMAIL="$2"
+      if [ ! -n "${REGISTRY_EMAIL}" ]; then
+        usage
+        error_exit "Error: Please specify a valid REGISTRY ACCESS TOKEN ('$REGISTRY_EMAIL' is invalid)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${fix_flag} | ${fix_short_flag})
+      FIX=1
+      shift # past argument
+      ;;
+    ${deploy_plugin_flag})
+      PLUGIN=1
+      shift # past argument
+      ;;
+    ${deploy_only_plugin_flag})
+      ONLY_PLUGIN=1
+      PLUGIN=1
+      FIX=1
+      shift # past argument
+      ;;
+    ${update_flag} | ${update_short_flag})
+      UPDATE=1
+      shift # past argument
+      ;;
+    $verbose_short_flag | $verbose_flag)
+      V=1
+      shift # past argument
+      ;;
+    ${debug_flag} | ${debug_short_flag})
+      set -x
+      shift # past argument
+      ;;
+    ${secret_operator_flag})
+      SECRET_OPERATOR=1
+      shift # past argument
+      ;;
+    ${only_controller_flag})
+      ONLY_OPERATOR=1;
+      shift # past argument
+      ;;
+    ${print_version_flag})
+      echo "$VERSION"
+      exit 0
+      ;;
+    ${no_sgxplugin})
+      RUN_SGXPLUGIN=0
+      shift # past argument
+      ;;
+    ${verify_sign_key_flag})
+      export cosign_public_key_file="$2"
+      if [ ! -e "${cosign_public_key_file}" ]; then
+        usage
+        error_exit "Error: Please specify a valid public key file for image signature verfication ('$cosign_public_key_file' does not exist)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${help_flag})
+      set_urls
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      error_exit "Error: Unknown parameter passed: $1";
+      ;;
+  esac
+done
+
+set_urls
+
+
+verbose "Checking if the kubectl plugin exists"
+
+Fixit=0
+KVERSION=$(kubectl provision --version 2>/dev/null) || Fixit=2
+
+if [[ $Fixit != 0 || "$VERSION" != "$KVERSION" ]] ; then
+    if [[ $Fixit == 2 ]] ; then
+        warning "SCONE kubectl plugin does not exist - must be deployed ($VERSION != $KVERSION)"
+    else
+        verbose "SCONE kubectl plugin must be updated"
+    fi
+    if [[ $FIX == 1 ]] ; then
+        if [[ $PLUGIN == 0 ]] ; then
+            warning "set flags $deploy_plugin_flag $fix_flag to reconcile the kubectl plugin"
+        else
+            if [[ "$PLUGINBIN" == ""  ]] ; then
+                error_exit "cannot write to binary $PLUGINBIN: please specify writable path '$plugin_flag <PATH>'"
+            else
+                verbose "Storing kubectl plugin in directory $PLUGINBIN"
+                verbose "  Fixing kubectl plugin - downloading $KUBECTLPLUGIN to file $PLUGINBIN"
+                curl -fsSL "$KUBECTLPLUGIN"  -o "$PLUGINBIN" || error_exit "Failed to download and install kubectl plugin"
+                chmod a+x "$PLUGINBIN"
+            fi
+        fi
+    else
+            verbose "Please set flag $fix_flag to fix this automatically"
+    fi
+else
+    verbose "  SCONE kubectl plugin version $VERSION is already installed"
+fi
+
+
+if [[ $ONLY_PLUGIN == 1 ]] ; then
+    verbose "Only installing / fixing 'kubectl provision' - Done."
+    exit 0
+fi
+
+
+
+if [[ $REGISTRY_USERNAME != "" || $REGISTRY_ACCESS_TOKEN != "" ||  $REGISTRY_EMAIL != "" ]] ; then
+    if [[ $REGISTRY_USERNAME == "" || $REGISTRY_ACCESS_TOKEN == "" ||  $REGISTRY_EMAIL == "" ]] ; then
+        error_exit "You need to specify flags $user_flag, $token_flag, $token_flag"
+    fi
+    export ACCOUNT_INFO=1
+else
+    export ACCOUNT_INFO=0
+fi
+
+
+if [[ $UPDATE == 1 ]] ; then
+    verbose "Updating / fixing all components"
+    FIX=1
+fi
+
+check_prerequisites
+
+verbose "Checking cert-manager"
+
+CM="0"
+
+if [[ $UPDATE == 1 ]] ; then
+    verbose "  Updating cert-manager (using manifest $CERT_MANAGER)"
+    kubectl apply -f "$CERT_MANAGER"
+fi
+
+until [[ $CM != "0" ]]
+do
+    export CM=`kubectl get pods -A | grep cert-manager | grep Running | wc -l | sed 's/^[[:space:]]*//g'`
+    if [[ $CM == "0" ]] ; then
+        warning "cert-manager is not running - trying to start cert manager"
+        kubectl apply -f "$CERT_MANAGER"
+        warning "waiting 5 seconds before checking again"
+        sleep 5
+    else
+        verbose "  cert-manager is running (found '$CM' running pods)"
+    fi
+done
+
+
+verbose "Checking that operator namespace '$NAMESPACE' exists"
+check_namespace "$NAMESPACE"
+
+if [[ "$create_ns" != "" ]] ; then
+    verbose "Checking that service namespace '$create_ns' exists"
+    check_namespace "$create_ns"
+fi
+
+verbose "Checking that SCONE Operator's web-hooks are available."
+wait_for_validating_webook "scone-validating-webhook-configuration-scone-system" "$NAMESPACE"
+wait_for_mutating_webook "scone-mutating-webhook-configuration-scone-system" "$NAMESPACE"
+
+if [[ $SECRET_OPERATOR == 1 ]] ; then
+    verbose "Checking if the secret operator exists"
+
+    SO=`helm list -A | grep scone-imps | wc -l | sed 's/^[[:space:]]*//g'`
+
+    if [[ $UPDATE == 1 && $SO != "0" ]] ; then
+        verbose "  Updating the Secret Operator"
+        helm repo add --force-update $IMPS_HELM_REPO
+        helm upgrade --install scone-imps $IMPS_HELM_CHART --namespace $NAMESPACE
+    fi
+
+    if [[ $SO == "0" ]] ; then
+        warning "SECRETS operator not installed!"
+        if [[ $FIX == 1 ]] ; then
+            verbose "  Fixing the SECRETS Operator"
+            helm repo add $IMPS_HELM_REPO
+            helm install scone-imps $IMPS_HELM_CHART --namespace $NAMESPACE
+        fi
+    fi
+    verbose "Ensuring that secrets 'sconeapps' and 'scone-operator-pull' are automatically available in all namespaces"
+    kubectl apply -f $SECRET_OPERATOR_MANIFEST
+fi
+
+check_secret "scone-operator-pull" "$NAMESPACE"
+check_secret "sconeapps" "$NAMESPACE"
+
+verbose "Checking SCONE Operator"
+# SO=`helm list -A | grep scone-operator | wc -l | sed 's/^[[:space:]]*//g'`
+
+INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.chart | startswith("scone-operator-"))' | jq '(.chart |  ltrimstr("scone-operator-"))' | tr -d '"')
+
+verbose "Installed version of the operator controller is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
+if [[ $UPDATE == 1 ]] ; then
+  if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
+    verbose "  Updating the SCONE Operator: helm upgrade --install scone-operator $HELM_CHART --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE"
+
+    download_file "$HELM_CHART" "scone-operator.tgz"
+
+    if [[ "$HELM_CHART" == "$SCONTAIN_OPERATOR_CHART" || "$cosign_public_key_file" != "" ]]; then
+        verify_image "k8soperators" "$VERSION"
+    else
+        warning "Skipping verification of signature of k8soperators image, due to unknown origin of HELM_CHART=$HELM_CHART"
+    fi
+
+    tar -xzf scone-operator.tgz
+    rm scone-operator.tgz
+    helm upgrade --install scone-operator ./scone-operator --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE
+    export INSTALLED_VERSION="$VERSION"
+    verbose "Waiting for controller to start up ... 30 seconds"
+    sleep 30
+    # sometime controller does not restart .. let's make sure it does
+    kubectl rollout restart deployment -n $NAMESPACE scone-controller-manager
+  else
+    verbose "The installed version of the SCONE Operator is already '$VERSION' - no need to update."
+  fi
+fi
+
+if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
+    warning "Desired version of SCONE operator is NOT installed ($INSTALLED_VERSION != $VERSION)!"
+    if [[ $FIX == 1 ]] ; then
+        verbose "  Fixing the SCONE Operator"
+
+        download_file "$HELM_CHART" "scone-operator.tgz"
+
+        if [[ "$HELM_CHART" == "$SCONTAIN_OPERATOR_CHART" || "$cosign_public_key_file" != "" ]]; then
+            verify_image "k8soperators" "$VERSION"
+        else
+            warning "Skipping verification of signature of k8soperators image, due to unknown origin of HELM_CHART=$HELM_CHART"
+        fi
+
+        tar -xzf scone-operator.tgz
+        rm scone-operator.tgz
+        helm upgrade --install scone-operator ./scone-operator --namespace $NAMESPACE --version $VERSION  --set image=$PULL_IMAGE
+    fi
+fi
+
+verbose "Checking that operator web-hooks are available."
+wait_for_validating_webook "cert-manager-webhook" "$NAMESPACE"
+wait_for_mutating_webook "cert-manager-webhook" "$NAMESPACE"
+
+if ! kubectl describe crd sgxplugins > /dev/null 2>/dev/null
+then
+    warning "Custom Resource Definition 'sgxplugins' does not yet exist - waiting for it to be created by the operator"
+    until kubectl get sgxplugin  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'sgxplugin' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
+fi
+
+if ! kubectl describe crd las > /dev/null 2>/dev/null
+then
+    warning "Custom Resource definition 'las' does not yet exist - waiting for it to be created by the operator"
+    until kubectl get las  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'las' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
+fi
+
+
+if ! kubectl describe crd cas > /dev/null 2>/dev/null
+then
+    warning "Custom Resource Definition 'cas' does not exist."
+    until kubectl get cas  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'cas' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
+fi
+
+if ! kubectl describe crd signedpolicies > /dev/null 2>/dev/null
+then
+    warning "Custom Resource Definition 'signedpolicies' does not exist."
+    until kubectl get signedpolicies  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'signedpolicies' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
+fi
+
+if ! kubectl describe crd encryptedpolicies > /dev/null 2>/dev/null
+then
+    warning "Custom Resource Definition 'encryptedpolicies' does not exist."
+    until kubectl get encryptedpolicies  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'encryptedpolicies' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
+fi
+
+
+if ! kubectl describe crd vaults > /dev/null 2>/dev/null
+then
+    warning "Custom Resource Definition 'vaults' does not exist."
+    until kubectl get vaults  > /dev/null 2>/dev/null
+    do
+        warning "Custom Resource Definition 'vaults' does not yet exist. Waiting a little for the CRD to get ready."
+        sleep 5
+    done
+fi
+
+
+if [[ $ONLY_OPERATOR == 1 ]] ; then
+    verbose "Only checking Operator - Done."
+    exit 0
+fi
+
+
+verbose "Checking SGXPlugin"
+
+if [[ $RUN_SGXPLUGIN == 1 ]] ; then 
+    download_file "$SGXPLUGIN_MANIFEST" ".sgxplugin-manifest.template"
+
+    envsubst < ".sgxplugin-manifest.template" > ".sgxplugin-manifest.yaml"
+
+    if ! kubectl get sgxplugin > /dev/null 2>/dev/null
+    then
+        if [[ $FIX == 1 ]] ; then
+            verbose "  Fixing by creating a sgxplugin resource using manifest $SGXPLUGIN_MANIFEST"
+            if [[ "$SGXPLUGIN_MANIFEST" == "$SCONTAIN_SGXPLUGIN_MANIFEST" || "$cosign_public_key_file" != "" ]]; then
+                verify_image "sgx-plugin" "$VERSION"
+            else
+                warning "Skipping verification of signature of sgxplugin image, due to unknown origin of SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
+            fi
+            wait_for_cmd_success "kubectl apply -f .sgxplugin-manifest.yaml"
+        fi
+    else
+        verbose "Custom Resource 'sgxplugin' does already exists. Checking name."
+
+        PLUGIN_NAME=$(kubectl get sgxplugin -A -o json | jq '.items[0].metadata.name' | tr -d '"')
+        if [[ "$PLUGIN_NAME" != "sgxplugin" && "$PLUGIN_NAME" != "" &&  "$PLUGIN_NAME" != "null" ]] ; then 
+            warning "Desired version of SCONE SGXPlugin has the wrong name ($PLUGIN_NAME) - deleting it!"
+            if [[ $FIX == 1 ]] ; then
+                kubectl delete sgxplugin "$PLUGIN_NAME" || error_exit "Failed to delete non-standard sgxplugin $PLUGIN_NAME - try to rerun this script"
+            fi
+        fi
+
+        INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.chart | startswith("sgxdevplugin-"))' | jq '(.chart |  ltrimstr("sgxdevplugin-"))' | tr -d '"')
+
+        verbose "Installed version of the SGXPlugin is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
+
+        verbose "Checking again if Custom Resource Definition 'sgxplugins' exists"
+        until kubectl get sgxplugin  > /dev/null 2>/dev/null
+        do
+            warning "Custom Resource Definition 'sgxplugin' does not yet exist. Waiting a little for the CRD to get ready."
+            sleep 5
+        done
+
+        if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
+            warning "Desired version of SCONE SGXPlugin is NOT installed!"
+            if [[ $FIX == 1 ]] ; then
+                verbose "  Fixing the SGXPlugin using $SGXPLUGIN_MANIFEST"
+                if [[ "$SGXPLUGIN_MANIFEST" == "$SCONTAIN_SGXPLUGIN_MANIFEST" || "$cosign_public_key_file" != "" ]]; then
+                    verify_image "sgx-plugin" "$VERSION"
+                else
+                    warning "Skipping verification of signature of sgxplugin image, due to unknown origin of SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
+                fi
+                until kubectl apply -f .sgxplugin-manifest.yaml 
+                do
+                    warning "Cannot update sgxplugin: maybe operator is not yet updated - hence, retrying soon"
+                    sleep 5
+                done
+            fi
+        fi
+    fi
+else
+    verbose "Skipping installation of SGX Plugin"
+fi
+
+if ! kubectl get "las" "las" > /dev/null 2>/dev/null
+then
+    warning "Custom Resource 'las' does not yet exist."
+    if [[ $FIX == 1 ]] ; then
+        verbose "  Fixing by creating a LAS resource using manifest '$LAS_MANIFEST'"
+
+        download_file "$LAS_MANIFEST" ".las-manifest.template"
+
+        envsubst < ".las-manifest.template" > ".las-manifest.yaml"
+
+        if  [[ "$LAS_MANIFEST" == "$SCONTAIN_LAS_MANIFEST" || "$cosign_public_key_file" != "" ]]; then
+            verify_image "las" "$VERSION"
+        else
+            warning "Skipping verification of signature of las image, due to unknown origin of LAS_MANIFEST=$LAS_MANIFEST"
+        fi
+        if [[ "$DCAP_KEY" == "" ]]; then
+            warning "LAS's liveness probe will be disabled since the DCAP API key was not provided with the $dcap_flag flag."
+        fi
+        kubectl apply -f ".las-manifest.yaml"
+    fi
+else
+    verbose "Custom Resource 'las' already exists"
+    LAS_IMAGE=$(kubectl get las las -n scone-system -o json | jq '.spec.image' | tr -d '"')
+    EXPECTED_IMAGE="${IMAGE_REPO}/${IMAGE_PREFIX}las:$VERSION"
+
+    verbose "LAS uses image $LAS_IMAGE and we expect image $EXPECTED_IMAGE"
+    if [[ "$EXPECTED_IMAGE" != "$LAS_IMAGE" || "$DCAP_KEY" != ""  ]] ; then
+        if [[ $FIX == 1 ]] ; then
+            verbose "Updating LAS image to $EXPECTED_IMAGE or updating DCAP_KEY"
+            download_file "$LAS_MANIFEST" ".las-manifest.template"
+
+            envsubst < ".las-manifest.template" > ".las-manifest.yaml"
+
+            if  [[ "$LAS_MANIFEST" == "$SCONTAIN_LAS_MANIFEST" || "$cosign_public_key_file" != "" ]]; then
+                verify_image "las" "$VERSION"
+            else
+                warning "Skipping verification of signature of las image, due to unknown origin of LAS_MANIFEST=$LAS_MANIFEST"
+            fi
+            kubectl apply -f ".las-manifest.yaml"
+        else
+            verbose "Please set flag $fix_flag to fix this automatically"
+        fi
+    fi
+fi
+
