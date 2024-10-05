@@ -118,13 +118,13 @@ fi
 # definitions related to secret operator (not recommended for production)
 
 if [[ "$IMPS_HELM_CHART" == "" ]] ; then
-    IMPS_HELM_CHART="banzaicloud-stable/imagepullsecrets"
+    IMPS_HELM_CHART="banzaicloud-mirror/imagepullsecrets"
 else
     warning "Using external IMPS_HELM_CHART=$IMPS_HELM_CHART"
 fi
 
 if [[ "$IMPS_HELM_REPO" == "" ]] ; then
-    IMPS_HELM_REPO="banzaicloud-stable https://kubernetes-charts.banzaicloud.com"
+    IMPS_HELM_REPO="banzaicloud-mirror https://raw.githubusercontent.com/scontain/imps/refs/heads/registry"
 else
     warning "Using external IMPS_HELM_REPO=$IMPS_HELM_REPO"
 fi
@@ -881,10 +881,18 @@ if [[ $SECRET_OPERATOR == 1 ]] ; then
     kubectl apply -f $SECRET_OPERATOR_MANIFEST
 fi
 
+
 check_secret "scone-operator-pull" "$NAMESPACE"
 check_secret "sconeapps" "$NAMESPACE"
 
 verbose "Checking SCONE Operator"
+
+# In new installations, helm upgrade --install scone-operator may fail because
+# there are no endpoints available for service "cert-manager-webhook"
+verbose "Checking that operator web-hooks are available."
+wait_for_validating_webook "cert-manager-webhook" "$NAMESPACE"
+wait_for_mutating_webook "cert-manager-webhook" "$NAMESPACE"
+
 # SO=`helm list -A | grep scone-operator | wc -l | sed 's/^[[:space:]]*//g'`
 
 INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.chart | startswith("scone-operator-"))' | jq '(.chart |  ltrimstr("scone-operator-"))' | tr -d '"')
