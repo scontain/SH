@@ -98,7 +98,7 @@ else
 fi
 
 if [[ "$CERT_MANAGER" == "" ]] ; then
-    CERT_MANAGER="https://github.com/cert-manager/cert-manager/releases/download/v1.10.1/cert-manager.yaml"
+    CERT_MANAGER="https://github.com/cert-manager/cert-manager/releases/download/v1.16.0/cert-manager.yaml"
 else
     warning "Using external CERT_MANAGER=$CERT_MANAGER"
 fi
@@ -378,6 +378,35 @@ function check_prerequisites() {
     if [[ "$exit_msg" != "" ]] ; then
         error_exit "$exit_msg"
     fi
+}
+
+
+# Function to check webhook exists as validating and mutating webhook
+
+function wait_for_validating_webook {
+    local WEBHOOK_NAME="$1"
+    local NAMESPACE="$2"
+
+    # Wait for the webhook-related deployment to be ready
+    while [[! kubectl get validatingwebhookconfigurations.admissionregistration.k8s.io "$WEBHOOK_NAME" -n "$NAMESPACE" 2> /dev/null ]]; do
+        verbose "Waiting for validating webhook $WEBHOOK_NAME in namespace $NAMESPACE to be ready..."
+        sleep 10
+    done
+
+    verbose "Validating webhook $WEBHOOK_NAME is ready."
+}
+
+function wait_for_mutating_webook {
+    local WEBHOOK_NAME="$1"
+    local NAMESPACE="$2"
+
+    # Wait for the webhook-related deployment to be ready
+    while [[! kubectl get mutatingwebhookconfigurations.admissionregistration.k8s.io "$WEBHOOK_NAME" -n "$NAMESPACE" 2> /dev/null ]]; do
+        verbose "Waiting for mutating webhook $WEBHOOK_NAME in namespace $NAMESPACE to be ready..."
+        sleep 10
+    done
+
+    verbose "$WEBHOOK_NAME is ready."
 }
 
 # Functions to fix state
@@ -898,6 +927,10 @@ if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
         helm upgrade --install scone-operator ./scone-operator --namespace $NAMESPACE --version $VERSION  --set image=$PULL_IMAGE
     fi
 fi
+
+verbose "Checking that operator web-hooks are available."
+wait_for_validating_webook "cert-manager-webhook" "$NAMESPACE"
+wait_for_mutating_webook "cert-manager-webhook" "$NAMESPACE"
 
 if ! kubectl describe crd sgxplugins > /dev/null 2>/dev/null
 then
