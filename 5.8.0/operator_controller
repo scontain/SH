@@ -381,33 +381,138 @@ function check_prerequisites() {
 }
 
 
-# Function to check webhook exists as validating and mutating webhook
+# Functions to check webhook exists as validating and mutating webhooks
 
-function wait_for_validating_webook {
-    local WEBHOOK_NAME="$1"
-    local NAMESPACE="$2"
+function wait_for_cert_manager_webhooks() {
+    local webhook_service_name="cert-manager-webhook"
+    local webhook_name="$webhook_service_name"
 
+    # First we decide in what namesapce the cert-manager was installed
+    verbose "    Checking whether the $webhook_service_name service has been created..."
+    local namespace=$(kubectl get svc -A | grep $webhook_service_name | awk '{ print $1 }')
+    while [[ "$namespace" == "" ]]; do
+        verbose "        Waiting for $webhook_service_name service to be created..."
+        sleep 3
+        namespace=$(kubectl get svc -A | grep $webhook_service_name | awk '{ print $1 }')
+    done
+    verbose "    The $webhook_service_name service exists."
+
+    # then we make sure the webhooks are created
+    wait_for_validating_webhook "$webhook_name"
+    wait_for_mutating_webhook "$webhook_name"
+
+    # we also check to make sure the service has become its endpoints
+    verbose "    Checking whether the pod serving the $webhook_service_name service is running..."
+    local serving_pod_name=$(kubectl get pods -n "$namespace" | grep $webhook_service_name | grep Running | awk '{ print $1 }')
+    while [[ "$serving_pod_name" == "" ]]; do
+        verbose "        Waiting for the pod of the $webhook_service_name service to be running..."
+        sleep 3
+        serving_pod_name=$(kubectl get pods -n "$namespace" | grep $webhook_service_name | grep Running | awk '{ print $1 }')
+    done
+    verbose "    The pod serving the $webhook_service_name service is running."
+
+    wait_for_service $webhook_service_name "$namespace" "$serving_pod_name"
+
+    # and that the clientConfig.caBundle has been injected
+    wait_for_ca_bundle_in_webhooks $webhook_name
+
+    verbose "The cert-manager webhooks are ready."
+}
+
+function wait_for_scone_operator_webhooks() {
+    local namespace=$1
+
+    local webhook_service_name="scone-webhook-service"
+
+    # First we make sure the webhooks are created
+    wait_for_validating_webhook scone-validating-webhook-configuration-scone-system
+    wait_for_mutating_webhook scone-mutating-webhook-configuration-scone-system
+
+    # then we also check to make sure the service has become its endpoints
+    verbose "    Checking whether the pod serving the $webhook_service_name service is running..."
+    local serving_pod_name=$(kubectl get pods -n "$namespace" | grep scone-controller-manager | grep Running | awk '{ print $1 }')
+    while [[ "$serving_pod_name" == "" ]]; do
+        verbose "        Waiting for scone-controller-manager pod to be created..."
+        sleep 3
+        serving_pod_name=$(kubectl get pods -n "$namespace" | grep scone-controller-manager | grep Running | awk '{ print $1 }')
+    done
+    verbose "    The pod serving the $webhook_service_name service is running."
+
+    wait_for_service $webhook_service_name "$namespace" "$serving_pod_name"
+
+    verbose "The SCONE operator webhooks are ready."
+}
+
+function wait_for_service() {
+    local service_name="$1"
+    local service_namespace="$2"
+    local serving_pod="$3"
+
+    verbose "    Checking whether the endpoints of the $service_name service in namespace $service_namespace have addresses..."
+    until kubectl get endpoints -n "$service_namespace" "$service_name" -o jsonpath='{.subsets}' | grep -q "addresses" ; do
+        verbose "        Waiting for the endpoints of the $service_name service in namespace $service_namespace to have addresses..."
+        sleep 3
+    done
+    verbose "    The endpoints of the $service_name service in namespace $service_namespace have addresses."
+
+    verbose "    Checking whether the $serving_pod is serving at the endpoint of the $service_name service in namespace $service_namespace..."
+    until kubectl get endpoints -n "$service_namespace" "$service_name" -o jsonpath='{.subsets}' | grep -q "$serving_pod" ; do
+        verbose "        Waiting for the service $service_name in namespace $service_namespace to be served by pod $serving_pod..."
+        sleep 3
+    done
+    verbose "    The $serving_pod is serving at the endpoint of the $service_name service in namespace $service_namespace."
+}
+
+function wait_for_validating_webhook() {
+    local webhook_name="$1"
+
+    verbose "    Checking whether validating webhook $webhook_name exists..."
     # Wait for the webhook-related deployment to be ready
-    while [[! kubectl get validatingwebhookconfigurations.admissionregistration.k8s.io "$WEBHOOK_NAME" -n "$NAMESPACE" 2> /dev/null ]]; do
-        verbose "Waiting for validating webhook $WEBHOOK_NAME in namespace $NAMESPACE to be ready..."
+    until kubectl get validatingwebhookconfigurations.admissionregistration.k8s.io "$webhook_name" &> /dev/null ; do
+        verbose "        Waiting for validating webhook $webhook_name to be ready..."
         sleep 10
     done
 
-    verbose "Validating webhook $WEBHOOK_NAME is ready."
+    verbose "    Validating webhook $webhook_name exists."
 }
 
-function wait_for_mutating_webook {
-    local WEBHOOK_NAME="$1"
-    local NAMESPACE="$2"
+function wait_for_mutating_webhook() {
+    local webhook_name="$1"
 
+    verbose "    Checking whether mutating webhook $webhook_name exists..."
     # Wait for the webhook-related deployment to be ready
-    while [[! kubectl get mutatingwebhookconfigurations.admissionregistration.k8s.io "$WEBHOOK_NAME" -n "$NAMESPACE" 2> /dev/null ]]; do
-        verbose "Waiting for mutating webhook $WEBHOOK_NAME in namespace $NAMESPACE to be ready..."
+    until kubectl get mutatingwebhookconfigurations.admissionregistration.k8s.io "$webhook_name" &> /dev/null ; do
+        verbose "        Waiting for mutating webhook $webhook_name to be ready..."
         sleep 10
     done
 
-    verbose "$WEBHOOK_NAME is ready."
+    verbose "    Mutating webhook $webhook_name exists."
 }
+
+function webhooks_have_ca_bundle() {
+    local webhook_name="$1"
+
+    kubectl get mutatingwebhookconfiguration "${webhook_name}" -o jsonpath='{.webhooks[*].clientConfig.caBundle}' 2>/dev/null | grep -q '[^[:space:]]' \
+        && kubectl get validatingwebhookconfiguration "${webhook_name}" -o jsonpath='{.webhooks[*].clientConfig.caBundle}' 2>/dev/null | grep -q '[^[:space:]]' \
+        && echo "yes" || echo "no"
+}
+
+# waits until the clientConfig.caBundle field has been injected into the webhooks.
+function wait_for_ca_bundle_in_webhooks() {
+    local webhook_name="$1"
+
+    verbose "    Checking whether the clientConfig.caBundle exists in both $webhook_name webhook configurations..."
+    local has_ca_bundle=$(webhooks_have_ca_bundle $webhook_name)
+    while [[ "$has_ca_bundle" == "no" ]] ; do
+        verbose "        Waiting for caBundle to appear in both $webhook_name webhook configurations..."
+        sleep 3
+
+        has_ca_bundle=$(webhooks_have_ca_bundle $webhook_name)
+    done
+
+    verbose "    The clientConfig.caBundle exists in both $webhook_name webhook configurations."
+}
+
 
 # Functions to fix state
 
@@ -828,25 +933,21 @@ check_prerequisites
 
 verbose "Checking cert-manager"
 
-CM="0"
-
 if [[ $UPDATE == 1 ]] ; then
     verbose "  Updating cert-manager (using manifest $CERT_MANAGER)"
     kubectl apply -f "$CERT_MANAGER"
-fi
-
-until [[ $CM != "0" ]]
-do
+else
     export CM=`kubectl get pods -A | grep cert-manager | grep Running | wc -l | sed 's/^[[:space:]]*//g'`
     if [[ $CM == "0" ]] ; then
         warning "cert-manager is not running - trying to start cert manager"
-        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.10.1/cert-manager.yaml
-        warning "waiting 5 seconds before checking again"
-        sleep 5
+        kubectl apply -f "$CERT_MANAGER"
     else
         verbose "  cert-manager is running (found '$CM' running pods)"
     fi
-done
+fi
+
+verbose "Checking that cert-manager webhooks are available."
+wait_for_cert_manager_webhooks
 
 verbose "Checking that operator namespace '$NAMESPACE' exists"
 check_namespace "$NAMESPACE"
@@ -883,12 +984,6 @@ check_secret "scone-operator-pull" "$NAMESPACE"
 check_secret "sconeapps" "$NAMESPACE"
 
 verbose "Checking SCONE Operator"
-
-# In new installations, helm upgrade --install scone-operator may fail because
-# there are no endpoints available for service "cert-manager-webhook"
-verbose "Checking that operator web-hooks are available."
-wait_for_validating_webook "cert-manager-webhook" "$NAMESPACE"
-wait_for_mutating_webook "cert-manager-webhook" "$NAMESPACE"
 
 # SO=`helm list -A | grep scone-operator | wc -l | sed 's/^[[:space:]]*//g'`
 
@@ -935,9 +1030,8 @@ if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
     fi
 fi
 
-verbose "Checking that operator web-hooks are available."
-wait_for_validating_webook "cert-manager-webhook" "$NAMESPACE"
-wait_for_mutating_webook "cert-manager-webhook" "$NAMESPACE"
+verbose "Checking that SCONE Operator's webhooks are available."
+wait_for_scone_operator_webhooks "$NAMESPACE"
 
 if ! kubectl describe crd sgxplugins > /dev/null 2>/dev/null
 then
