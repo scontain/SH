@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+
+: '
+Access to this file is granted under the SCONE COMMERCIAL LICENSE V1.0
+
+Any use of this product using this file requires a commercial license from scontain UG, www.scontain.com.
+
+Permission is also granted  to use the Program for a reasonably limited period of time  (but no longer than 1 month)
+for the purpose of evaluating its usefulness for a particular purpose.
+
+THERE IS NO WARRANTY FOR THIS PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN OTHERWISE STATED IN WRITING
+THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM PROVE DEFECTIVE,
+YOU ASSUME THE COST OF ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
+
+IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED ON IN WRITING WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MAY
+MODIFY AND/OR REDISTRIBUTE THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL,
+INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM INCLUDING BUT NOT LIMITED TO LOSS
+OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE
+WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+Copyright (C) 2022-2025 scontain.com
+'
+
+set -e
+
+export K_PROVISION_VERSION="5.10.0-rc.3"
+
+export RED='\e[31m'
+export BLUE='\e[34m'
+export ORANGE='\e[33m'
+export NC='\e[0m' # No Color
+
+
+function verbose () {
+    if [[ $V -eq 1 ]]; then
+        echo -e "${BLUE}- $@${NC}" >/dev/stderr
+    fi
+}
+
+function warning () {
+    echo -e "${ORANGE}WARNING: $@${NC}" >/dev/stderr
+}
+
+function error_exit() {
+    trap '' EXIT
+    echo -e "${RED}$1${NC}" >/dev/stderr
+    exit 1
+}
+
+function get_audit_log() {
+    local cas_name="$1"
+    local cas_namespace="$2"
+    local fflag="$3"
+    local svc="CAS"
+    kubectl logs "$cas_name"-0 -n "$cas_namespace" -c audit $fflag || error_exit "Could not retrieve audit log of $svc $cas_name in namespace $cas_namespace"
+    exit 0
+}
+
+do_follow=""
+do_help=0
+
+help_flag="--help"
+help_short_flag="-h"
+ns_flag="--namespace"
+ns_short_flag="-n"
+verbose_short_flag="-v"
+verbose_flag="--verbose"
+debug_flag="--debug"
+debug_short_flag="-d"
+follow_flag="--follow"
+follow_short_flag="-f"
+
+
+export SVC=""
+# NAME is the name of the cas
+export NAME=""
+export DEFAULT_NAMESPACE="default"
+
+function set_defaults() {
+    if [[ "$NAMESPACE" == "" ]] ; then
+        export NAMESPACE="$DEFAULT_NAMESPACE" # Default Kubernetes namespace to use
+    else
+        warning "Using external NAMESPACE=$NAMESPACE"
+    fi
+}
+
+usage ()
+{
+    echo ""
+    echo "Usage:"
+    echo "  kubectl audit cas [NAME] ... [$help_flag]"
+    echo ""
+    echo "Displays the audit information of the specified CAS"
+    echo ""
+    echo "Arguments:"
+    echo "  Name of the cas: NAME"
+    echo "    - If no name is specified, we set NAME=cas"
+    echo ""
+    echo "Options:"
+    echo "    $ns_short_flag <NAMESPACE> | $ns_flag <NAMESPACE>"
+    echo "                  The Kubernetes namespace in which the cas is deployed"
+    echo "                  Default value: \"$DEFAULT_NAMESPACE\""
+    echo "    $verbose_short_flag | $verbose_flag"
+    echo "                  Enable verbose output"
+    echo "    $debug_short_flag | $debug_flag"
+    echo "                  Enabled debug mode"
+    echo "    $follow_short_flag | $follow_flag"
+    echo "                  If provided, the audit log stream is kept open."
+    echo "    $help_short_flag | $help_flag"
+    echo "                  Output this usage information and exit."
+    echo "    $print_version_flag"
+    echo "                  Print version of this script ($K_PROVISION_VERSION) and exit."
+    echo ""
+}
+
+
+##### Parsing arguments
+
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        ${ns_flag} | ${ns_short_flag})
+            export NAMESPACE=""
+            export DEFAULT_NAMESPACE="$2"
+            if [ ! -n "${DEFAULT_NAMESPACE}" ]; then
+                usage
+                error_exit "Error: The namespace '$DEFAULT_NAMESPACE' is invalid."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${verbose_flag}|${verbose_short_flag})
+            V=1
+            shift # past argument
+            ;;
+        ${follow_flag} | ${follow_short_flag})
+	        do_follow="-f"
+            shift # past argument
+            ;;
+        ${debug_flag} | ${debug_short_flag})
+            set -x
+            shift # past argument
+            ;;
+        ${print_version_flag})
+            echo $K_PROVISION_VERSION
+            exit 0
+            ;;
+        ${help_flag} | ${help_short_flag})
+            do_help=1
+            shift
+            ;;
+        *)
+            if [[ $1 == -* ]] ; then
+                usage
+                error_exit "Error: Unknown argument passed: $1";
+            elif [[ "${SVC}" == "" ]]; then
+                SVC="$1"
+                if [[ "$SVC" != "cas" ]]; then
+                    error_exit "Supported SCONE services to audit: cas. Received: $SVC"
+		fi
+            elif [[ "${NAME}" == "" ]]; then
+                NAME="$1"
+            else
+                usage
+                error_exit "Error: Unknown parameter passed: $1";
+            fi
+            shift # past argument
+            ;;
+    esac
+done
+
+set_defaults
+
+if [ $do_help != 0 ] ; then
+    usage
+    exit 0
+fi
+
+if [[ "${SVC}" != "cas" ]]; then
+    usage
+    error_exit "Error: Please specify a valid SVC ('$SVC' is invalid)."
+fi
+
+if [[ "$NAME" == "" ]] ; then
+    verbose "No CAS name is specified - using '$SVC' as NAME"
+    NAME="$SVC"
+fi
+
+if ! kubectl get namespace "$NAMESPACE" > /dev/null 2>/dev/null
+then
+    error_exit "Namespace '$NAMESPACE' cannot be retrieved. Either it does not exist or the cluster is not reachable."
+fi
+
+verbose "Making sure CAS '$NAME' in namespace '$NAMESPACE' already exists"
+export IMAGE=""
+EXISTS=1  JSON=$(kubectl get cas "$NAME" --namespace "$NAMESPACE" -o json 2>/dev/null) || EXISTS=0
+
+if [[ $EXISTS == 0 ]]; then
+    error_exit "The CAS $NAME in namespace $NAMESPACE could not be found. Please specify an existing CAS."
+fi
+
+get_audit_log $NAME $NAMESPACE $do_follow
