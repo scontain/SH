@@ -21,7 +21,7 @@ INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE T
 OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE
 WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
 
-Copyright (C) 2022-2023 scontain.com
+Copyright (C) 2022-2025 scontain.com
 '
 
 : '
@@ -42,7 +42,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 
 set -e
 
-export K_PROVISION_VERSION="5.8.1"
+export K_PROVISION_VERSION="5.10.0"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -86,8 +86,8 @@ source "$CONFIG_FILE" 2>/dev/null || verbose "Note: could not load config file \
 #
 # VERSION: all components 
 #
-#  latest   # default: install the latest version - right now this would be 5.8.0
-#  5.8.0    # specific: version of the operator to install
+#  latest   # default: install the latest stable version
+#  5.9.0    # specific: version of the operator to install
 #
 
 
@@ -97,8 +97,13 @@ else
     warning "Using external VERSION=$VERSION"
 fi
 
+if [[ $VERSION =~ ^"5." ]]; then
+    warning "DEPRECATION WARNING: All SCONE versions prior to 6.0.0 will be deprecated with the sunsetting of the DCAP v3 Intel PCS API on October 31th 2025 the latest! It is mandatory to upgrade CAS and LAS to 6.0.0 before October 31th 2025 to ensure continued operations."
+fi
+
 if [[ "$CERT_MANAGER" == "" ]] ; then
-    CERT_MANAGER="https://github.com/cert-manager/cert-manager/releases/download/v1.12.4/cert-manager.yaml"
+    CERT_MANAGER_VERSION=$(curl -s https://api.github.com/repos/cert-manager/cert-manager/releases/latest | jq -r '.tag_name')
+    CERT_MANAGER="https://github.com/cert-manager/cert-manager/releases/download/$CERT_MANAGER_VERSION/cert-manager.yaml"
 else
     warning "Using external CERT_MANAGER=$CERT_MANAGER"
 fi
@@ -118,13 +123,13 @@ fi
 # definitions related to secret operator (not recommended for production)
 
 if [[ "$IMPS_HELM_CHART" == "" ]] ; then
-    IMPS_HELM_CHART="banzaicloud-stable/imagepullsecrets"
+    IMPS_HELM_CHART="banzaicloud-mirror/imagepullsecrets"
 else
     warning "Using external IMPS_HELM_CHART=$IMPS_HELM_CHART"
 fi
 
 if [[ "$IMPS_HELM_REPO" == "" ]] ; then
-    IMPS_HELM_REPO="banzaicloud-stable https://kubernetes-charts.banzaicloud.com"
+    IMPS_HELM_REPO="banzaicloud-mirror https://raw.githubusercontent.com/scontain/imps/refs/heads/registry"
 else
     warning "Using external IMPS_HELM_REPO=$IMPS_HELM_REPO"
 fi
@@ -143,6 +148,47 @@ fi
 
 SIGNER="5BCAD31DCC8D5D722B7B7ABD2EBE04E7CC816D32"
 
+
+#
+# auto_detect_helm_driver
+#
+# helm can store its state as configmaps, secrets, or in sql. 
+# One can select the mode via HELM_DRIVER environment variable. 
+# HELM_DRIVER can be set to one of the following values: [configmap, secret, sql]
+#
+# Problem:
+#  helm cannot change from one to another driver. Hence, we need to keep the same  driver.
+#
+# Ref: https://helm.sh/docs/topics/advanced/
+#
+function auto_detect_helm_driver() {
+
+    local auto_selection
+    local SECENTRIES
+
+#    CMENTRIES=$(kubectl get configmap -n $NAMESPACE | grep sh.helm.release.v1.scone-operator | wc -l)
+    SECENTRIES=$(kubectl get secrets -A | grep sh.helm.release.v1.scone-operator | wc -l)
+    if [[ $SECENTRIES > 0 ]] ; then
+        verbose "auto_detect_helm_driver: HELM_DRIVER=secret"
+        auto_selection="secret"
+    else
+        verbose "auto_detect_helm_driver: HELM_DRIVER=configmap"
+        auto_selection="configmap"
+    fi
+    if [[ $do_auto_detect == 1 ]] ; then
+        echo "$auto_selection"
+    else
+        verbose "skipping auto_detect_helm_driver - driver manually specified: HELM_DRIVER=$HELM_DRIVER"
+        if [[ "$auto_selection" != "$HELM_DRIVER" ]]; then
+            local used_option="$helm_use_configmap"
+            if [[ "$HELM_DRIVER" == "secret" ]]; then
+                used_option="$helm_use_secrets"
+            fi
+            error_exit "$used_option cannot be used since the SCONE operator already uses the resource kind $auto_selection to store its state."
+        fi
+        echo $HELM_DRIVER
+    fi
+}
 
 #
 # verify signed manifests
@@ -332,7 +378,6 @@ function check_prerequisites() {
         echo -e "- ${ORANGE}Please install  'helm' - see https://helm.sh/docs/intro/install/${NC}"
     fi
 
-    exit_msg=""
     verbose "Checking that we have access to jq"
     if ! command -v jq &> /dev/null
     then
@@ -380,6 +425,130 @@ function check_prerequisites() {
     fi
 }
 
+# Functions to check webhook exists as validating and mutating webhooks
+
+function wait_for_cert_manager_webhooks() {
+    local webhook_service_name="cert-manager-webhook"
+    local webhook_name="$webhook_service_name"
+
+    # First we decide in what namesapce the cert-manager was installed
+    verbose "    Checking whether the $webhook_service_name service has been created..."
+    local namespace=$(kubectl get svc -A | grep $webhook_service_name | awk '{ print $1 }')
+    while [[ "$namespace" == "" ]]; do
+        verbose "        Waiting for $webhook_service_name service to be created..."
+        sleep 3
+        namespace=$(kubectl get svc -A | grep $webhook_service_name | awk '{ print $1 }')
+    done
+    verbose "    The $webhook_service_name service exists."
+
+    # then we make sure the webhooks are created
+    wait_for_validating_webhook "$webhook_name"
+    wait_for_mutating_webhook "$webhook_name"
+
+    # we also check to make sure the service has become its endpoints
+    verbose "    Checking whether the pod serving the $webhook_service_name service is running..."
+    local serving_pod_name=$(kubectl get pods -n "$namespace" | grep $webhook_service_name | grep Running | awk '{ print $1 }')
+    while [[ "$serving_pod_name" == "" ]]; do
+        verbose "        Waiting for the pod of the $webhook_service_name service to be running..."
+        sleep 3
+        serving_pod_name=$(kubectl get pods -n "$namespace" | grep $webhook_service_name | grep Running | awk '{ print $1 }')
+    done
+    verbose "    The pod serving the $webhook_service_name service is running."
+
+    wait_for_service $webhook_service_name "$namespace"
+
+    # and that the clientConfig.caBundle has been injected
+    wait_for_ca_bundle_in_webhooks $webhook_name
+
+    verbose "The cert-manager webhooks are ready."
+}
+
+function wait_for_scone_operator_webhooks() {
+    local namespace=$1
+
+    local webhook_service_name="scone-webhook-service"
+
+    # First we make sure the webhooks are created
+    wait_for_validating_webhook scone-validating-webhook-configuration-$namespace
+    wait_for_mutating_webhook scone-mutating-webhook-configuration-$namespace
+
+    # then we also check to make sure the service has become its endpoints
+    verbose "    Checking whether the pod serving the $webhook_service_name service is running..."
+    local serving_pod_name=$(kubectl get pods -n "$namespace" | grep scone-controller-manager | grep Running | awk '{ print $1 }')
+    while [[ "$serving_pod_name" == "" ]]; do
+        verbose "        Waiting for scone-controller-manager pod to be created..."
+        sleep 3
+        serving_pod_name=$(kubectl get pods -n "$namespace" | grep scone-controller-manager | grep Running | awk '{ print $1 }')
+    done
+    verbose "    The pod serving the $webhook_service_name service is running."
+
+    wait_for_service $webhook_service_name "$namespace"
+
+    verbose "The SCONE operator webhooks are ready."
+}
+
+function wait_for_service() {
+    local service_name="$1"
+    local service_namespace="$2"
+
+    verbose "    Checking whether the endpoint slice of the $service_name service in namespace $service_namespace is ready and serving ..."
+    until kubectl get endpointslices -n "$service_namespace" -l "kubernetes.io/service-name=$service_name" -o json | jq -e '.items[0] | select(all(.endpoints[]; .conditions.ready == true and .conditions.serving == true))' 2>/dev/null; do
+        verbose "        Waiting for the endpoint slice of the $service_name service in namespace $service_namespace to be ready and serving..."
+        sleep 3
+    done
+    verbose "    The endpoint slice of the $service_name service in namespace $service_namespace is ready and serving."
+}
+
+function wait_for_validating_webhook() {
+    local WEBHOOK_NAME="$1"
+
+    verbose "    Checking whether validating webhook $WEBHOOK_NAME exists..."
+    # Wait for the webhook-related deployment to be ready
+    until kubectl get validatingwebhookconfigurations.admissionregistration.k8s.io "$WEBHOOK_NAME" &> /dev/null ; do
+        verbose "        Waiting for validating webhook $WEBHOOK_NAME to be ready..."
+        sleep 10
+    done
+
+    verbose "    Validating webhook $WEBHOOK_NAME exists."
+}
+
+function wait_for_mutating_webhook() {
+    local WEBHOOK_NAME="$1"
+
+    verbose "    Checking whether mutating webhook $WEBHOOK_NAME exists..."
+    # Wait for the webhook-related deployment to be ready
+    until kubectl get mutatingwebhookconfigurations.admissionregistration.k8s.io "$WEBHOOK_NAME" &> /dev/null ; do
+        verbose "        Waiting for mutating webhook $WEBHOOK_NAME to be ready..."
+        sleep 10
+    done
+
+    verbose "    Mutating webhook $WEBHOOK_NAME exists."
+}
+
+function webhooks_have_ca_bundle() {
+    local webhook_name="$1"
+
+    kubectl get mutatingwebhookconfiguration "${webhook_name}" -o jsonpath='{.webhooks[*].clientConfig.caBundle}' 2>/dev/null | grep -q '[^[:space:]]' \
+        && kubectl get validatingwebhookconfiguration "${webhook_name}" -o jsonpath='{.webhooks[*].clientConfig.caBundle}' 2>/dev/null | grep -q '[^[:space:]]' \
+        && echo "yes" || echo "no"
+}
+
+# waits until the clientConfig.caBundle field has been injected into the webhooks.
+function wait_for_ca_bundle_in_webhooks() {
+    local webhook_name="$1"
+
+    verbose "    Checking whether the clientConfig.caBundle exists in both $webhook_name webhook configurations..."
+    local has_ca_bundle=$(webhooks_have_ca_bundle $webhook_name)
+    while [[ "$has_ca_bundle" == "no" ]] ; do
+        verbose "        Waiting for caBundle to appear in both $webhook_name webhook configurations..."
+        sleep 3
+
+        has_ca_bundle=$(webhooks_have_ca_bundle $webhook_name)
+    done
+
+    verbose "    The clientConfig.caBundle exists in both $webhook_name webhook configurations."
+}
+
 # Functions to fix state
 
 # USE default external namespace manifest -> which has $namespace
@@ -401,7 +570,7 @@ kind: Namespace
 metadata:
   name: $NAMESPACE
   labels:
-    name: scone-system
+    name: $NAMESPACE
   annotations:
     scone-operator/inject-pull-secret:  "true"
     sconeapps/inject-pull-secret:  "true"
@@ -432,7 +601,7 @@ function check_secret {
         # and we reenable the pushing of this image
         if [[ $SECRET_OPERATOR == 1 ]] ; then
             verbose "  Re-enabling injection of secret $secret"
-            kubectl apply -f $SECRET_OPERATOR_MANIFEST
+            kubectl apply -f .secrets_operator.yaml
         fi
     fi
     if ! kubectl get secret "$secret" -n "$namespace" > /dev/null 2>/dev/null
@@ -528,6 +697,7 @@ user_flag="--username"
 token_flag="--access-token"
 email_flag="--email"
 deploy_plugin_flag="--plugin"
+deploy_only_plugin_flag="--only-plugin"
 plugin_flag="--plugin-path"
 secret_operator_flag="--secret-operator"
 version_flag="--set-version"
@@ -537,8 +707,17 @@ no_sgxplugin="--no-sgxplugin"
 verify_sign_key_flag="--verify-image-signatures"
 dcap_flag="--dcap-api"
 dcap_short_flag="-d"
+node_selector_flag="--node-selector"
+helm_use_configmap="--helm-use-configmap"
+helm_use_secrets="--helm-use-secret"
+helm_secret=false
+helm_confimap=false
 
-NAMESPACE="$DEFAULT_NAMESPACE"
+do_auto_detect=1
+
+export NAMESPACE="$DEFAULT_NAMESPACE"
+
+
 repo="$APP_IMAGE_REPO"
 create_ns=""
 
@@ -553,7 +732,10 @@ REGISTRY_EMAIL=""
 PLUGIN=0
 SECRET_OPERATOR=0
 ONLY_OPERATOR=0
+ONLY_PLUGIN=0
 RUN_SGXPLUGIN=1
+export NODESELECTOR="# nodeSelector:"
+export NODESELECTORKEY="# no node selector specified - SGXPlugin runs on all nodes"
 
 # find directory on path where we are permitted to copy the plugin to
 
@@ -564,8 +746,7 @@ PLUGINBIN=`which kubectl-provision` || { PLUGINBIN="" ; for p in ${PATH//:/ } ; 
     done
 }
 
-usage ()
-{
+function usage () {
   echo ""
   echo "Usage:"
   echo "  operator_controller [OPTIONS]"
@@ -577,6 +758,7 @@ usage ()
   echo "  - Creates a namespace for a service if flag $cr_flag NAMESPACE is set."
   echo "  - If the $verify_sign_key_flag is provided, or if the Scontain container image repository"
   echo "    is used, the signatures of the images used are verified."
+  echo "  - We determine if helm,as part of the SCONE operator, uses configmaps or secrets to store its state."
   echo ""
   echo ""
   echo "Options:"
@@ -590,9 +772,9 @@ usage ()
   echo "                  The Kubernetes namespace in which the SCONE operator should be deployed on the cluster."
   echo "                  Default value: \"$DEFAULT_NAMESPACE\""
   echo "    $cr_short_flag | $cr_flag NAMESPACE"
-  echo "                  Create namespace \"NAMESPACE\" for provisioning SCONE CAS (or another service)."
+  echo "                  Create namespace \"NAMESPACE\" for provisioning SCONE CAS, or, another service."
   echo "    $user_flag REGISTRY_USERNAME"
-  echo "                  To create/update/fix the pull secrets ('sconeapps' and 'scone-operator-pull'), "
+  echo "                  To create/update/fix the pull secrets - 'sconeapps' and 'scone-operator-pull',"
   echo "                  one needs to specify the user name, access token, and email of the registry."
   echo "                  Signup for an account: https://sconedocs.github.io/registry/"
   echo "    $token_flag REGISTRY_ACCESS_TOKEN"
@@ -600,31 +782,48 @@ usage ()
   echo "    $email_flag REGISTRY_EMAIL"
   echo "                  The email address belonging to the pull secret."
   echo "    $deploy_plugin_flag"
-  echo "                  Include the kubectl plugin in the reconciliation and updates."
+  echo "                  Include the 'kubectl provision' in the reconciliation and updates."
+  echo "    $deploy_only_plugin_flag"
+  echo "                  Deploy 'kubectl provision' and exit."
   echo "    $plugin_flag PATH"
   echo "                  Path where we should write the kubectl plugin binary. The path must be writeable."
   echo "                  Default value: \"$PLUGINBIN\""
   echo "                  The prefix of the default value is the last path on your shell \$PATH that is writeable. "
   echo "                  If none is writeable and you set $deploy_plugin_flag, you must specify $plugin_flag PATH."
   echo "    $secret_operator_flag"
-  echo "                  Check/Reconcile/Update the Secret Operator (used to inject Kubernetes Secrets into Kubernetes namespaces)"
+  echo "                  Check/Reconcile/Update the Secret Operator which is used to inject Kubernetes Secrets into Kubernetes namespaces"
   echo "    $only_controller_flag"
-  echo "                  Only install the SCONE Operator (but no LAS, SGXPlugin, kubectl plugin)"
+  echo "                  Only install the SCONE Operator - but no LAS, SGXPlugin, kubectl plugin"
   echo "    $verbose_short_flag | $verbose_flag"
   echo "                  Enable verbose output"
   echo "    $debug_flag | debug_short_flag"
   echo "                  Create debug image instead of a production image"
   echo "    $version_flag VERSION"
   echo "                  Set the version of the helm chart"
-  echo "    $no_sgxplugin" 
-  echo "                  Set this flag in case you do not want to install the SGXPlugin."
   echo "    $verify_sign_key_flag PUBLIC_KEY_PATH"
   echo "                  Path to the public key to use for verification of signed images."
   echo "                  For the verification of signed images in the $SCONTAIN_IMAGE_REPO"
   echo "                  repository, the public key does not need to be provided, and this"
   echo "                  option is ignored."
   echo "    $dcap_flag | $dcap_short_flag <DCAP API Key>"
-  echo "                  DCAP API Key - required when provisioning LAS."
+  echo "                  DCAP API Key - required if no PCKCert Caching service is used."
+  echo "                  NOTE that LAS HEALTH CHECKS are INCOMPLETE in case this is not specified."
+  echo "    $no_sgxplugin" 
+  echo "                  Set this flag in case you do not want to install the SGXPlugin."
+  echo "    $node_selector_flag  <NODE SELECTOR>"
+  echo "                  The SGX Plugin will run, by default, on run on all nodes to grant containers"  
+  echo "                  access to the SGX device. You can use this flag to limit the SGX Plugin to a subset"
+  echo "                  of the nodes. For example, if SGX enabled nodes are already labeled, we could set" 
+  echo "                  $node_selector_flag  'intel.feature.node.kubernetes.io/sgx: \"true\"'"
+  echo "    $helm_use_configmap"
+  echo "                  Configure helm to use Kubernetes configmaps to store its state."
+  echo "                  This is the default behaviour, if no SCONE operator exists."
+  echo "                  This option is mutually exclusive with $helm_use_secrets."
+  echo "                  NOTE: Once the SCONE operator exists, the resource kind used cannot be changed."
+  echo "    $helm_use_secrets" 
+  echo "                  Configure helm to use Kubernetes secrets to store its state."
+  echo "                  This option is mutually exclusive with $helm_use_configmap."
+  echo "                  NOTE: Once the SCONE operator exists, the resource kind used cannot be changed."
   echo "    $help_flag"
   echo "                  Output this usage information and exit."
   echo ""
@@ -632,6 +831,7 @@ usage ()
   echo "  - CERT_MANAGER=$CERT_MANAGER"
   echo "  - DEFAULT_NAMESPACE=$DEFAULT_NAMESPACE"
   echo "  - HELM_CHART=$HELM_CHART"
+  echo "  - HELM_DRIVER=$HELM_DRIVER"
   echo "  - LAS_MANIFEST=$LAS_MANIFEST"
   echo "  - SGXPLUGIN_MANIFEST=$SGXPLUGIN_MANIFEST"
   echo "  - REGISTRY=$REGISTRY"
@@ -642,6 +842,7 @@ usage ()
   echo "  - IMPS_HELM_REPO=$IMPS_HELM_REPO"
   echo "  - VERSION=$VERSION"
   echo "You can overwrite the defaults by exporting these environment variables before executing this script."
+  echo "DEPRECATION WARNING: All SCONE versions prior to 6.0.0 will be deprecated with the sunsetting of the DCAP v3 Intel PCS API on October 31th 2025 the latest! It is mandatory to upgrade CAS and LAS to 6.0.0 before October 31th 2025 to ensure continued operations."
 }
 
 ##### Parsing arguments
@@ -658,7 +859,7 @@ while [[ "$#" -gt 0 ]]; do
       shift || true # past value
       ;;
     ${ns_flag} | ${ns_short_flag})
-      NAMESPACE="$2"
+      export NAMESPACE="$2"
       if [ ! -n "${NAMESPACE}" ]; then
         usage
         error_exit "Error: The namespace '$NAMESPACE' is invalid."
@@ -681,6 +882,17 @@ while [[ "$#" -gt 0 ]]; do
         usage
         error_exit "Error: Please specify a valid kubectl plugin path ('$PLUGINBIN' is invalid)."
       fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${node_selector_flag})
+      export NODESELECTOR="$2"
+      if [ ! -n "${NODESELECTOR}" ]; then
+        usage
+        error_exit "Error: Please specify a valid node selector ('$NODESELECTOR' is invalid)."
+      fi
+      export NODESELECTORKEY="nodeSelector:"
+
       shift # past argument
       shift || true # past value
       ;;
@@ -708,6 +920,9 @@ while [[ "$#" -gt 0 ]]; do
         usage
         error_exit "Error: Please specify a valid VERSION ('$VERSION' is invalid)."
       fi
+      if [[ $VERSION =~ ^"5." ]]; then
+        warning "DEPRECATION WARNING: All SCONE versions prior to 6.0.0 will be deprecated with the sunsetting of the DCAP v3 Intel PCS API on October 31th 2025 the latest! It is mandatory to upgrade CAS and LAS to 6.0.0 before October 31th 2025 to ensure continued operations."
+      fi
       shift # past argument
       shift || true # past value
       ;;
@@ -724,8 +939,26 @@ while [[ "$#" -gt 0 ]]; do
       FIX=1
       shift # past argument
       ;;
+    ${helm_use_secrets})
+      do_auto_detect=0 # no automatic update of HELM_DRIVER in case we change the namespace later
+      export HELM_DRIVER="secret"
+      helm_secret=true
+      shift # past argument
+      ;;
+    ${helm_use_configmap})
+      do_auto_detect=0 # no automatic update of HELM_DRIVER in case we change the namespace later
+      export HELM_DRIVER="configmap"
+      helm_configmap=true
+      shift # past argument
+      ;;
     ${deploy_plugin_flag})
       PLUGIN=1
+      shift # past argument
+      ;;
+    ${deploy_only_plugin_flag})
+      ONLY_PLUGIN=1
+      PLUGIN=1
+      FIX=1
       shift # past argument
       ;;
     ${update_flag} | ${update_short_flag})
@@ -779,6 +1012,60 @@ done
 
 set_urls
 
+if [[ "$helm_secret" == "true" && "$helm_configmap" == "true" ]]; then
+    error_exit "$helm_use_secrets and $helm_use_configmap are musually exclusive."
+fi
+
+
+export HELM_DRIVER=$(auto_detect_helm_driver)
+if [[ "$HELM_DRIVER" == "" ]]; then
+    error_exit "Failed to determine the helm driver."
+fi
+
+verbose "Checking if upgrade is supported..."
+INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.chart | startswith("scone-operator-"))' | jq '(.chart |  ltrimstr("scone-operator-"))' | tr -d '"')
+if [[ "$INSTALLED_VERSION" =~ ^"5.8" && "$VERSION" =~ ^"5.8" ]]; then
+    error_exit "Cannot upgrade from 5.8.x to another 5.8.x - upgrade of 5.8 patch version not supported"
+fi
+
+verbose "Checking if the kubectl plugin exists"
+
+Fixit=0
+KVERSION=$(kubectl provision --version 2>/dev/null) || Fixit=2
+
+if [[ $Fixit != 0 || "$VERSION" != "$KVERSION" ]] ; then
+    if [[ $Fixit == 2 ]] ; then
+        warning "SCONE kubectl plugin does not exist - must be deployed ($VERSION != $KVERSION)"
+    else
+        verbose "SCONE kubectl plugin must be updated"
+    fi
+    if [[ $FIX == 1 ]] ; then
+        if [[ $PLUGIN == 0 ]] ; then
+            warning "set flags $deploy_plugin_flag $fix_flag to reconcile the kubectl plugin"
+        else
+            if [[ "$PLUGINBIN" == ""  ]] ; then
+                error_exit "cannot write to binary $PLUGINBIN: please specify writable path '$plugin_flag <PATH>'"
+            else
+                verbose "Storing kubectl plugin in directory $PLUGINBIN"
+                verbose "  Fixing kubectl plugin - downloading $KUBECTLPLUGIN to file $PLUGINBIN"
+                curl -fsSL "$KUBECTLPLUGIN"  -o "$PLUGINBIN" || error_exit "Failed to download and install kubectl plugin"
+                chmod a+x "$PLUGINBIN"
+            fi
+        fi
+    else
+            verbose "Please set flag $fix_flag to fix this automatically"
+    fi
+else
+    verbose "  SCONE kubectl plugin version $VERSION is already installed"
+fi
+
+
+if [[ $ONLY_PLUGIN == 1 ]] ; then
+    verbose "Only installing / fixing 'kubectl provision' - Done."
+    exit 0
+fi
+
+
 
 if [[ $REGISTRY_USERNAME != "" || $REGISTRY_ACCESS_TOKEN != "" ||  $REGISTRY_EMAIL != "" ]] ; then
     if [[ $REGISTRY_USERNAME == "" || $REGISTRY_ACCESS_TOKEN == "" ||  $REGISTRY_EMAIL == "" ]] ; then
@@ -799,25 +1086,21 @@ check_prerequisites
 
 verbose "Checking cert-manager"
 
-CM="0"
-
 if [[ $UPDATE == 1 ]] ; then
     verbose "  Updating cert-manager (using manifest $CERT_MANAGER)"
     kubectl apply -f "$CERT_MANAGER"
-fi
-
-until [[ $CM != "0" ]]
-do
+else
     export CM=`kubectl get pods -A | grep cert-manager | grep Running | wc -l | sed 's/^[[:space:]]*//g'`
     if [[ $CM == "0" ]] ; then
         warning "cert-manager is not running - trying to start cert manager"
         kubectl apply -f "$CERT_MANAGER"
-        warning "waiting 5 seconds before checking again"
-        sleep 5
     else
         verbose "  cert-manager is running (found '$CM' running pods)"
     fi
-done
+fi
+
+verbose "Checking that cert-manager webhooks are available."
+wait_for_cert_manager_webhooks
 
 verbose "Checking that operator namespace '$NAMESPACE' exists"
 check_namespace "$NAMESPACE"
@@ -842,25 +1125,29 @@ if [[ $SECRET_OPERATOR == 1 ]] ; then
         warning "SECRETS operator not installed!"
         if [[ $FIX == 1 ]] ; then
             verbose "  Fixing the SECRETS Operator"
-            helm repo add $IMPS_HELM_REPO
+            helm repo add --force-update $IMPS_HELM_REPO
             helm install scone-imps $IMPS_HELM_CHART --namespace $NAMESPACE
         fi
     fi
     verbose "Ensuring that secrets 'sconeapps' and 'scone-operator-pull' are automatically available in all namespaces"
-    kubectl apply -f $SECRET_OPERATOR_MANIFEST
+    download_file $SECRET_OPERATOR_MANIFEST ".secrets_operator.template"
+    envsubst < ".secrets_operator.template" > ".secrets_operator.yaml"
+    kubectl apply -f .secrets_operator.yaml
 fi
 
 check_secret "scone-operator-pull" "$NAMESPACE"
 check_secret "sconeapps" "$NAMESPACE"
 
 verbose "Checking SCONE Operator"
+
 # SO=`helm list -A | grep scone-operator | wc -l | sed 's/^[[:space:]]*//g'`
 
+INSTALLED_STATUS=$(helm list -o json --all-namespaces | jq -r '.[] | select(.chart | startswith("scone-operator-"))' | jq '(.status)' | tr -d '"')
 INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.chart | startswith("scone-operator-"))' | jq '(.chart |  ltrimstr("scone-operator-"))' | tr -d '"')
 
 verbose "Installed version of the operator controller is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
 if [[ $UPDATE == 1 ]] ; then
-  if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
+  if [[ "$INSTALLED_VERSION" != "$VERSION" || "$INSTALLED_STATUS" == "failed" ]] ; then
     verbose "  Updating the SCONE Operator: helm upgrade --install scone-operator $HELM_CHART --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE"
 
     download_file "$HELM_CHART" "scone-operator.tgz"
@@ -873,11 +1160,15 @@ if [[ $UPDATE == 1 ]] ; then
 
     tar -xzf scone-operator.tgz
     rm scone-operator.tgz
-    helm upgrade --install scone-operator ./scone-operator --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE
+    helm upgrade --install scone-operator ./scone-operator --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE --set helmDriver=$HELM_DRIVER  || {
+        verbose "let's try to fix this by first deleting the existing deployment of the scone-controller-manager"
+        kubectl delete deployment  -n $NAMESPACE scone-controller-manager
+        helm upgrade --install scone-operator ./scone-operator --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE  --set helmDriver=$HELM_DRIVER
+    }
     export INSTALLED_VERSION="$VERSION"
     verbose "Waiting for controller to start up ... 30 seconds"
     sleep 30
-    # sometime controller does not restart .. let's make sure it does
+    # sometime controller does not restart because of some limitations of K8s/helm
     kubectl rollout restart deployment -n $NAMESPACE scone-controller-manager
   else
     verbose "The installed version of the SCONE Operator is already '$VERSION' - no need to update."
@@ -899,9 +1190,12 @@ if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
 
         tar -xzf scone-operator.tgz
         rm scone-operator.tgz
-        helm upgrade --install scone-operator ./scone-operator --namespace $NAMESPACE --version $VERSION  --set image=$PULL_IMAGE
+        helm upgrade --install scone-operator ./scone-operator --namespace $NAMESPACE --version $VERSION  --set image=$PULL_IMAGE --set helmDriver=$HELM_DRIVER
     fi
 fi
+
+verbose "Checking that SCONE Operator's webhooks are available."
+wait_for_scone_operator_webhooks "$NAMESPACE"
 
 if ! kubectl describe crd sgxplugins > /dev/null 2>/dev/null
 then
@@ -979,7 +1273,7 @@ if [[ $RUN_SGXPLUGIN == 1 ]] ; then
 
     envsubst < ".sgxplugin-manifest.template" > ".sgxplugin-manifest.yaml"
 
-    if ! kubectl get sgxplugin > /dev/null 2>/dev/null
+    if ! kubectl get sgxplugin sgxplugin > /dev/null 2>/dev/null
     then
         if [[ $FIX == 1 ]] ; then
             verbose "  Fixing by creating a sgxplugin resource using manifest $SGXPLUGIN_MANIFEST"
@@ -1013,7 +1307,7 @@ if [[ $RUN_SGXPLUGIN == 1 ]] ; then
         done
 
         if [[ "$INSTALLED_VERSION" != "$VERSION" ]] ; then
-            warning "Desired version of SCONE SGXPlugin is NOT installed!"
+            warning "Desired version of SCONE SGXPlugin is NOT installed! (Desired: '$VERSION', Installed: '$INSTALLED_VERSION')"
             if [[ $FIX == 1 ]] ; then
                 verbose "  Fixing the SGXPlugin using $SGXPLUGIN_MANIFEST"
                 if [[ "$SGXPLUGIN_MANIFEST" == "$SCONTAIN_SGXPLUGIN_MANIFEST" || "$cosign_public_key_file" != "" ]]; then
@@ -1026,6 +1320,27 @@ if [[ $RUN_SGXPLUGIN == 1 ]] ; then
                     warning "Cannot update sgxplugin: maybe operator is not yet updated - hence, retrying soon"
                     sleep 5
                 done
+                # This first wait is to try to avoid some known race condition we have. This will be addressed in later versions
+                verbose "  Waiting 120s to make sure new plugin registers to kubernetes"
+                sleep 120
+                CURRENT_SGX_PLUGIN_STATE=$(kubectl get sgxplugin sgxplugin -n $NAMESPACE -o json | jq -r '.status.state')
+                CHECK_STARTING_TIME_FOR_SGX_PLUGIN=$(date)
+                declare -i time_counter=0
+                declare -i six_min_in_sec=360
+                declare -i twelve_min_in_sec=720
+                while [[ "$CURRENT_SGX_PLUGIN_STATE" != "HEALTHY" ]] ; do
+                    verbose "  Waiting again for sgxplugin get to HEALTHY state. Current state is $CURRENT_SGX_PLUGIN_STATE - We delete the sgxplugin daemonset since some labels might be immutable and that can prevent upgrades"
+                    verbose "  We are waiting since $CHECK_STARTING_TIME_FOR_SGX_PLUGIN, now it is $(date). If it takes more than 12m, we delete sgxplugin daemonset and wait again - current time counter: $time_counter seconds"
+                    if [[ $time_counter -eq $twelve_min_in_sec ]]; then
+                        kubectl delete daemonset sgxplugin -n $NAMESPACE || true
+                        CHECK_STARTING_TIME_FOR_SGX_PLUGIN=$(date)
+                        time_counter=0
+                    fi
+                    sleep $six_min_in_sec
+                    time_counter=$((time_counter + six_min_in_sec))
+                    CURRENT_SGX_PLUGIN_STATE=$(kubectl get sgxplugin sgxplugin -n $NAMESPACE -o json | jq -r '.status.state')
+                done
+                verbose "  Ok."
             fi
         fi
     fi
@@ -1055,52 +1370,51 @@ then
     fi
 else
     verbose "Custom Resource 'las' already exists"
-    LAS_IMAGE=$(kubectl get las las -n scone-system -o json | jq '.spec.image' | tr -d '"')
+    LAS_IMAGE=$(kubectl get las las -n $NAMESPACE -o json | jq '.spec.image' | tr -d '"')
     EXPECTED_IMAGE="${IMAGE_REPO}/${IMAGE_PREFIX}las:$VERSION"
 
     verbose "LAS uses image $LAS_IMAGE and we expect image $EXPECTED_IMAGE"
-    if [[ "$EXPECTED_IMAGE" != "$LAS_IMAGE" || "$DCAP_KEY" != ""  ]] ; then
-        verbose "Updating LAS image to $EXPECTED_IMAGE or updating DCAP_KEY"
-        download_file "$LAS_MANIFEST" ".las-manifest.template"
 
-        envsubst < ".las-manifest.template" > ".las-manifest.yaml"
+    # try to extract existing DCAP_KEY from the LAS
+    EXISTING_DCAP_KEY=$(kubectl get las las -o json | jq -r '.spec.dcapKey' )
 
-        if  [[ "$LAS_MANIFEST" == "$SCONTAIN_LAS_MANIFEST" || "$cosign_public_key_file" != "" ]]; then
-            verify_image "las" "$VERSION"
-        else
-            warning "Skipping verification of signature of las image, due to unknown origin of LAS_MANIFEST=$LAS_MANIFEST"
+    if [[ "$EXISTING_DCAP_KEY" == "null" ]] ; then
+        warning "Cannot get dcapKey from existing LAS image - maybe it is not yet created"
+        EXISTING_DCAP_KEY=""
+        if [[ "$DCAP_KEY" == "" ]] ; then
+            warning "DCAP_KEY is empty - LAS liveness checks will be incomplete since the DCAP API key was not provided with the $dcap_flag flag!"
         fi
-        kubectl apply -f ".las-manifest.yaml"
     fi
-fi
 
-
-verbose "Checking if the kubectl plugin exists"
-
-Fixit=0
-KVERSION=$(kubectl provision --version 2>/dev/null) || Fixit=2
-
-if [[ $Fixit != 0 || "$VERSION" != "$KVERSION" ]] ; then
-    if [[ $Fixit == 2 ]] ; then
-        warning "SCONE kubectl plugin does not exist - must be deployed ($VERSION != $KVERSION)"
-    else
-        verbose "SCONE kubectl plugin must be updated"
-
+    # if the DCAP_KEY is not set, we use the one from the LAS if it exists
+    if [[ "$DCAP_KEY" == "" && "$EXISTING_DCAP_KEY" != "" ]] ; then
+        warning "Using existing DCAP_KEY from LAS: $EXISTING_DCAP_KEY"
+        DCAP_KEY="$EXISTING_DCAP_KEY"
     fi
-    if [[ $FIX == 1 ]] ; then
-        if [[ $PLUGIN == 0 ]] ; then
-            warning "set flags $deploy_plugin_flag $fix_flag to reconcile the kubectl plugin"
-        else
-            if [[ "$PLUGINBIN" == ""  ]] ; then
-                error_exit "cannot write to binary $PLUGINBIN: please specify writable path '$plugin_flag <PATH>'"
+
+    # We need to reconcile the LAS image if it is not the expected one or if the DCAP_KEY is not set
+    if [[ "$EXPECTED_IMAGE" != "$LAS_IMAGE" || "$DCAP_KEY" != "$EXISTING_DCAP_KEY"  ]] ; then
+        if [[ $FIX == 1 ]] ; then
+            verbose "Updating LAS image to $EXPECTED_IMAGE or updating DCAP_KEY"
+            download_file "$LAS_MANIFEST" ".las-manifest.template"
+
+            envsubst < ".las-manifest.template" > ".las-manifest.yaml"
+
+            if  [[ "$LAS_MANIFEST" == "$SCONTAIN_LAS_MANIFEST" || "$cosign_public_key_file" != "" ]]; then
+                verify_image "las" "$VERSION"
             else
-                verbose "Storing kubectl plugin in directory $PLUGINBIN"
-                verbose "  Fixing kubectl plugin - downloading $KUBECTLPLUGIN to file $PLUGINBIN"
-                curl -fsSL "$KUBECTLPLUGIN"  -o "$PLUGINBIN" || error_exit "Failed to download and install kubectl plugin"
-                chmod a+x "$PLUGINBIN"
+                warning "Skipping verification of signature of las image, due to unknown origin of LAS_MANIFEST=$LAS_MANIFEST"
             fi
+            kubectl apply -f ".las-manifest.yaml"
+        else
+            if [[ "$EXPECTED_IMAGE" != "$LAS_IMAGE" ]] ; then
+                warning "Desired version of SCONE LAS is NOT installed OR DCAP_KEY is out-of-date! (Expected image: '$EXPECTED_IMAGE', Actual image: '$LAS_IMAGE')"
+            fi
+            if [[ "$DCAP_KEY" != "$EXISTING_DCAP_KEY"  ]] ; then
+                warning "DCAP key is not set or does not match the existing one! (Expected DCAP key: '$DCAP_KEY', Existing DCAP key: '$EXISTING_DCAP_KEY')"
+            fi
+            verbose "Please set flag $fix_flag to fix this automatically"
         fi
     fi
-else
-    verbose "  SCONE kubectl plugin is already installed"
 fi
+
