@@ -40,9 +40,10 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
     - the images used in the CHART are versioned but we overwrite the image with $REGISTRY/scone.cloud/k8soperators:$VERSION
 '
 
-set -e
+set -e -o pipefail
 
-export K_PROVISION_VERSION="5.10.1"
+
+export K_PROVISION_VERSION="6.0.0"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -433,11 +434,11 @@ function wait_for_cert_manager_webhooks() {
 
     # First we decide in what namesapce the cert-manager was installed
     verbose "    Checking whether the $webhook_service_name service has been created..."
-    local namespace=$(kubectl get svc -A | grep $webhook_service_name | awk '{ print $1 }')
+    local namespace=$(kubectl get svc -A |grep -E "([[:space:]])${webhook_service_name}([[:space:]])" | awk '{ print $1 }')
     while [[ "$namespace" == "" ]]; do
         verbose "        Waiting for $webhook_service_name service to be created..."
         sleep 3
-        namespace=$(kubectl get svc -A | grep $webhook_service_name | awk '{ print $1 }')
+        namespace=$(kubectl get svc -A | grep grep -E "([[:space:]])${webhook_service_name}([[:space:]])" | awk '{ print $1 }')
     done
     verbose "    The $webhook_service_name service exists."
 
@@ -446,7 +447,7 @@ function wait_for_cert_manager_webhooks() {
     wait_for_mutating_webhook "$webhook_name"
 
     # we also check to make sure the service has become its endpoints
-    verbose "    Checking whether the pod serving the $webhook_service_name service is running..."
+    verbose "    Checking whether the pod serving the $webhook_service_name service is running in namespace $namespace..."
     local serving_pod_name=$(kubectl get pods -n "$namespace" | grep $webhook_service_name | grep Running | awk '{ print $1 }')
     while [[ "$serving_pod_name" == "" ]]; do
         verbose "        Waiting for the pod of the $webhook_service_name service to be running..."
@@ -473,7 +474,7 @@ function wait_for_scone_operator_webhooks() {
     wait_for_mutating_webhook scone-mutating-webhook-configuration-$namespace
 
     # then we also check to make sure the service has become its endpoints
-    verbose "    Checking whether the pod serving the $webhook_service_name service is running..."
+    verbose "    Checking whether the pod serving the $webhook_service_name service is running in namespace $namespace..."
     local serving_pod_name=$(kubectl get pods -n "$namespace" | grep scone-controller-manager | grep Running | awk '{ print $1 }')
     while [[ "$serving_pod_name" == "" ]]; do
         verbose "        Waiting for scone-controller-manager pod to be created..."
@@ -581,6 +582,87 @@ EOF
     else
         verbose "  Namespace '$NAMESPACE' already exist - no updating/fixing"
     fi
+}
+
+###############################################################################
+# check_pull_secret  <secret> <image>  [namespace] [timeout]
+#
+# - <secret>      : name of the imagePullSecret (must be in <namespace>)
+# - <image>       : private image that REQUIRES that secret
+# - [namespace]   : defaults to the namespace of the current context (or default if unset)
+# - [timeout]     : overall seconds to wait (default 60)
+#
+# Prints a ✓/✗ message and the relevant kubernetes Events on failure and error exits
+###############################################################################
+
+check_pull_secret() {
+
+  local secret="$1" image="$2" ns="${3:-}" timeout="${4:-60}"
+  if [[ -z $secret || -z $image ]]; then
+    echo "Usage: check_pull_secret <secret> <image> [namespace] [timeout]" >&2
+    return 2
+  fi
+
+  # Determine namespace (current context → .namespace → default)
+  if [[ -z $ns ]]; then
+    ns=$(kubectl config view --minify -o 'jsonpath={..namespace}' 2>/dev/null)
+    ns=${ns:-default}
+  fi
+
+  kubectl get secret "$secret" -n "$ns" >/dev/null 2>&1 ||
+    { echo "Secret \"$secret\" not found in namespace \"$ns\"." >&2; return 1; }
+
+  local pod="pull-check-$(date +%s)-$RANDOM"
+
+  # Cleanup helper -------------------------------------------------------------
+  _cleanup() {
+    kubectl delete pod "$pod" -n "$ns" --grace-period=0 --force \
+      --ignore-not-found &>/dev/null
+  }
+  trap _cleanup EXIT INT TERM   # safety net
+
+  # Create the pod -------------------------------------------------------------
+  if ! kubectl run "$pod" -n "$ns" \
+        --image="$image" --restart=Never --image-pull-policy=Always \
+        --overrides='{"spec":{"imagePullSecrets":[{"name":"'"$secret"'"}]}}' \
+        --quiet --command -- sleep 1 ; then
+    echo "Failed to create test pod; aborting." >&2
+    _cleanup; trap - EXIT INT TERM
+    return 1
+  fi
+
+  # Wait loop ------------------------------------------------------------------
+  local start=$(date +%s)
+  while true; do
+    read -r phase reason <<<"$(kubectl get pod "$pod" -n "$ns" -o \
+      jsonpath='{.status.phase} {.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null)"
+
+    # Success ------------------------------------------------------------------
+    if [[ $phase == "Succeeded" ]]; then
+      echo "✓ Pull secret \"$secret\" WORKS in namespace \"$ns\"."
+      _cleanup; trap - EXIT INT TERM      # delete pod before returning
+      return 0
+    fi
+
+    # Known pull failures ------------------------------------------------------
+    if [[ $reason =~ (ErrImagePull|ImagePullBackOff|Unauthorized|InvalidImageName|RegistryUnavailable) ]]; then
+      echo "✗ Image pull failed: $reason" \
+           "(secret=\"$secret\", ns=\"$ns\")" >&2
+      kubectl describe pod "$pod" -n "$ns" | awk '/Events:/,0' >&2
+      _cleanup; trap - EXIT INT TERM       # delete pod before returning
+      return 1
+    fi
+
+    # Timeout ------------------------------------------------------------------
+    if (( $(date +%s) - start >= timeout )); then
+      echo "✗ Timed out (${timeout}s) waiting for image pull (pod=\"$pod\")." >&2
+      kubectl describe pod "$pod" -n "$ns" | awk '/Events:/,0' >&2
+      _cleanup; trap - EXIT INT TERM       # delete pod before returning
+      return 1
+    fi
+
+    sleep 2
+  done
 }
 
 
@@ -1135,8 +1217,14 @@ if [[ $SECRET_OPERATOR == 1 ]] ; then
     kubectl apply -f .secrets_operator.yaml
 fi
 
+# check/ensure that the pull secrets exist in the selected namespace
 check_secret "scone-operator-pull" "$NAMESPACE"
 check_secret "sconeapps" "$NAMESPACE"
+
+# check that the pull secrets give us access to private scone.cloud images 
+# we use an image that is part of namespace "scone.cloud" and which contains command "sleep"
+check_pull_secret sconeapps registry.scontain.com/scone.cloud/sconecli:$VERSION "$NAMESPACE"
+check_pull_secret scone-operator-pull registry.scontain.com/scone.cloud/sconecli:$VERSION "$NAMESPACE"
 
 verbose "Checking SCONE Operator"
 
