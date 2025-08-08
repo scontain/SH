@@ -26,7 +26,7 @@ Copyright (C) 2022-2025 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="5.10.1"
+export K_PROVISION_VERSION="6.0.0"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -1278,7 +1278,7 @@ function print_cas_keys {
         -e SCONE_PRODUCTION=0 \
         -e SCONE_MODE="sim" \
         ${SCONECLI_IMAGE} \
-        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null 2> /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null 2> /dev/nul || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }   ; scone cas set-default host.docker.internal:$LOCAL_CAS_CLIENT_PORT ; echo -en 'export CAS_KEY=\"' ; scone cas show-identification -c  | tr -d '\n'  ; echo -en '\"\nexport CAS_SOFTWARE_KEY=\"' ; scone cas show-identification -s | tr -d '\n' ; echo -en '\"\nexport CAS_SESSION_ENCRYPTION_KEY=\"'; scone cas show-identification --session-encryption-key  | tr -d '\n' ; echo -en '\"\nexport CAS_CERT=\"' ; scone cas show-certificate ; echo -en '\"\n' "
+        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null 2> /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null 2> /dev/null || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }   ; scone cas set-default host.docker.internal:$LOCAL_CAS_CLIENT_PORT ; echo -en 'export CAS_KEY=\"' ; scone cas show-identification -c  | tr -d '\n'  ; echo -en '\"\nexport CAS_SOFTWARE_KEY=\"' ; scone cas show-identification -s | tr -d '\n' ; echo -en '\"\nexport CAS_SESSION_ENCRYPTION_KEY=\"'; scone cas show-identification --session-encryption-key  | tr -d '\n' ; echo -en '\"\nexport CAS_CERT=\"' ; scone cas show-certificate ; echo -en '\"\n' "
 
     chmod og-rwx "${TARGET_MOUNT_DIR}/identity/config.json"
 
@@ -1325,7 +1325,7 @@ function print_vault_keys {
           -e SCONE_PRODUCTION=0 \
           -e SCONE_MODE="sim" \
           ${SCONECLI_IMAGE} \
-          bash -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT > /dev/null 2> /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT > /dev/null 2> /dev/nul || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal:$CAS_CLIENT_PORT ; scone cas show-identification --cas-software-certificate   > "/cas-certs/${CAS}_${NAMESPACE}.cert"' || { kill -9 $SERVICE_PID ; error_exit "Failed to determine CAS certificate of $SVCNAME in namespace $NAMESPACE." ; }
+          bash -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT > /dev/null 2> /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$CAS_CLIENT_PORT > /dev/null 2> /dev/null || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal:$CAS_CLIENT_PORT ; scone cas show-identification --cas-software-certificate   > "/cas-certs/${CAS}_${NAMESPACE}.cert"' || { kill -9 $SERVICE_PID ; error_exit "Failed to determine CAS certificate of $SVCNAME in namespace $NAMESPACE." ; }
 
     chmod og-rwx "${TARGET_MOUNT_DIR}/identity/config.json"
 
