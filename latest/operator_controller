@@ -40,10 +40,10 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
     - the images used in the CHART are versioned but we overwrite the image with $REGISTRY/scone.cloud/k8soperators:$VERSION
 '
 
-set -e -o pipefail
+set -e
 
 
-export K_PROVISION_VERSION="6.0.0"
+export K_PROVISION_VERSION="6.0.1"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -434,11 +434,11 @@ function wait_for_cert_manager_webhooks() {
 
     # First we decide in what namesapce the cert-manager was installed
     verbose "    Checking whether the $webhook_service_name service has been created..."
-    local namespace=$(kubectl get svc -A |grep -E "([[:space:]])${webhook_service_name}([[:space:]])" | awk '{ print $1 }')
+    local namespace=$(kubectl get svc -A | grep -E "([[:space:]])${webhook_service_name}([[:space:]])" | awk '{ print $1 }')
     while [[ "$namespace" == "" ]]; do
         verbose "        Waiting for $webhook_service_name service to be created..."
         sleep 3
-        namespace=$(kubectl get svc -A | grep grep -E "([[:space:]])${webhook_service_name}([[:space:]])" | awk '{ print $1 }')
+        namespace=$(kubectl get svc -A | grep -E "([[:space:]])${webhook_service_name}([[:space:]])" | awk '{ print $1 }')
     done
     verbose "    The $webhook_service_name service exists."
 
@@ -597,7 +597,7 @@ EOF
 
 check_pull_secret() {
 
-  local secret="$1" image="$2" ns="${3:-}" timeout="${4:-60}"
+  local secret="$1" image="$2" ns="${3:-}" timeout="${4:-600}"
   if [[ -z $secret || -z $image ]]; then
     echo "Usage: check_pull_secret <secret> <image> [namespace] [timeout]" >&2
     return 2
@@ -928,7 +928,7 @@ function usage () {
 }
 
 ##### Parsing arguments
-
+args="$@"
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     ${dcap_flag} | ${dcap_short_flag})
@@ -1002,8 +1002,8 @@ while [[ "$#" -gt 0 ]]; do
         usage
         error_exit "Error: Please specify a valid VERSION ('$VERSION' is invalid)."
       fi
-      if [[ $VERSION =~ ^"5." ]]; then
-        warning "DEPRECATION WARNING: All SCONE versions prior to 6.0.0 will be deprecated with the sunsetting of the DCAP v3 Intel PCS API on October 31th 2025 the latest! It is mandatory to upgrade CAS and LAS to 6.0.0 before October 31th 2025 to ensure continued operations."
+      if [[ $VERSION =~ ^"5." ]] || [[ $VERSION =~ ^"6." ]]; then
+        error_exit "Error: This script only installs/upgrades SCONE components versions >= 7.0.0 ('$VERSION' is invalid). To install or upgrade SCONE components using previous versions, use versions < 7.0.0 of this script"
       fi
       shift # past argument
       shift || true # past value
@@ -1087,6 +1087,7 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     *)
       usage
+      warning "Arguments passed: $args"
       error_exit "Error: Unknown parameter passed: $1";
       ;;
   esac
@@ -1165,6 +1166,15 @@ if [[ $UPDATE == 1 ]] ; then
 fi
 
 check_prerequisites
+
+verbose "   Checking whether there are instances of vaults.services.scone.cloud CRD installed"
+
+if kubectl get crd vaults.services.scone.cloud >> /dev/null; then
+    warning "\"vaults.services.scone.cloud\" CRD detected in the cluster is not be supported in version \"$VERSION\""
+    echo "Cowardly refusing to continue with installation/upgrade with version \"$VERSION\". This version does not support Vault \"vaults.services.scone.cloud\""
+    echo "Check the Vault instances, migrate the secrets, and delete the Vaults to be able to continue"
+    exit 1
+fi
 
 verbose "Checking cert-manager"
 
@@ -1335,18 +1345,6 @@ then
         sleep 5
     done
 fi
-
-
-if ! kubectl describe crd vaults > /dev/null 2>/dev/null
-then
-    warning "Custom Resource Definition 'vaults' does not exist."
-    until kubectl get vaults  > /dev/null 2>/dev/null
-    do
-        warning "Custom Resource Definition 'vaults' does not yet exist. Waiting a little for the CRD to get ready."
-        sleep 5
-    done
-fi
-
 
 if [[ $ONLY_OPERATOR == 1 ]] ; then
     verbose "Only checking Operator - Done."
