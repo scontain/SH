@@ -43,7 +43,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 set -e
 
 
-export K_PROVISION_VERSION="6.0.1"
+export K_PROVISION_VERSION="6.0.2"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -1001,9 +1001,6 @@ while [[ "$#" -gt 0 ]]; do
       if [ ! -n "${VERSION}" ]; then
         usage
         error_exit "Error: Please specify a valid VERSION ('$VERSION' is invalid)."
-      fi
-      if [[ $VERSION =~ ^"5." ]] || [[ $VERSION =~ ^"6." ]]; then
-        error_exit "Error: This script only installs/upgrades SCONE components versions >= 7.0.0 ('$VERSION' is invalid). To install or upgrade SCONE components using previous versions, use versions < 7.0.0 of this script"
       fi
       shift # past argument
       shift || true # past value
