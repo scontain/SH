@@ -1,0 +1,3283 @@
+#!/usr/bin/env bash
+
+: '
+Access to this file is granted under the SCONE COMMERCIAL LICENSE V1.0
+
+Any use of this product using this file requires a commercial license from scontain UG, www.scontain.com.
+
+Permission is also granted  to use the Program for a reasonably limited period of time  (but no longer than 1 month)
+for the purpose of evaluating its usefulness for a particular purpose.
+
+THERE IS NO WARRANTY FOR THIS PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN OTHERWISE STATED IN WRITING
+THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM PROVE DEFECTIVE,
+YOU ASSUME THE COST OF ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
+
+IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED ON IN WRITING WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MAY
+MODIFY AND/OR REDISTRIBUTE THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL,
+INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM INCLUDING BUT NOT LIMITED TO LOSS
+OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE
+WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+Copyright (C) 2022-2025 scontain.com
+'
+
+set -e
+
+export K_PROVISION_VERSION="6.0.3-rc.1"
+export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
+export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
+export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
+export K_ISVPRODID="41316"
+export K_ISVSVN="5"
+export K_PROVISION_MAX_RETRIES=${K_PROVISION_MAX_RETRIES:-100000}
+
+export RED='\e[31m'
+export BLUE='\e[34m'
+export ORANGE='\e[33m'
+export NC='\e[0m' # No Color
+
+export SCONTAIN_IMAGE_REPO="registry.scontain.com/scone.cloud"
+export DEFAULT_MANIFESTS_URL="https://raw.githubusercontent.com/scontain/manifests/main"
+export DEFAULT_DCAP_KEY="00000000000000000000000000000000"
+export DEFAULT_CAS_CLIENT_PORT=8081
+export CAS_CLIENT_PORT=""
+export LOCAL_CAS_CLIENT_PORT=""
+# TODO: Set CAS_ENCLAVE_PORT the same way as CAS_CLIENT_PORT
+export CAS_ENCLAVE_PORT=18765
+
+BASE_OWNER_IDENTITY_FILE_REL_LOC="identity/base-owner-identity.json"
+
+function verbose () {
+    if [[ $V -eq 1 ]]; then
+        echo -e "${BLUE}- $@${NC}" >/dev/stderr
+    fi
+}
+
+function warning () {
+    echo -e "${ORANGE}WARNING: $@${NC}" >/dev/stderr
+}
+
+function error_exit() {
+    trap '' EXIT
+    echo -e "${RED}$1${NC}" >/dev/stderr
+    exit 1
+}
+
+function set_platform_ids {
+    export PLATFORM_IDS=$(kubectl get LAS -A -o json | jq '.items[].status.nodes[].publicKey' | tr -d '"' | sort | uniq | tr '\n' ',' | sed 's/,$//' | awk '{ print "platforms: [" $1 "]" }')
+}
+
+
+#
+# create a file with the public key of the signer key for all scone.cloud images
+#
+
+function create_cosign_verification_key() {
+    export cosign_public_key_file="$(mktemp).pub"
+    cat > $cosign_public_key_file <<EOF
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAErLf0HT8xZlLaoX5jNN8aVL1Yrs+P
+wS7K6tXeRlWLlUX1GeEtTdcuhZMKb5VUNaWEJW2ZU0YIF91D93dCZbUYpw==
+-----END PUBLIC KEY-----
+EOF
+}
+
+
+#
+# validate_hex_32 checks if the input is a valid 32-character hexadecimal string
+#
+# Example usage:
+#
+# validate_hex_32 "$nonce" && echo "Valid" || echo "Invalid"
+#
+
+function validate_hex_32() {
+    # Check if argument exists
+    if [ $# -ne 1 ]; then
+        echo "Error: Exactly one argument required" >&2
+        return 1
+    fi
+    
+    # Store input
+    local input="$1"
+    
+    # Check length
+    if [ ${#input} -ne 32 ]; then
+        echo "Error: Input must be exactly 32 characters long" >&2
+        return 1
+    fi
+    
+    # Check if all characters are valid hex digits
+    case $input in
+        *[!0-9a-fA-F]*)
+            echo "Error: Input contains non-hexadecimal characters" >&2
+            return 1
+            ;;
+    esac
+    
+    # If we reach here, input is valid
+    return 0
+}
+
+#
+# generate_random_hex_32 generates a random 32-character hexadecimal string
+#
+# Example usage:
+#
+# random_hex=$(generate_random_hex_32)
+# echo "$random_hex"
+#
+# Verify length
+# echo "Length: ${#random_hex}"
+#
+
+generate_random_hex_32() {
+    chars=({0..9} {a..f})
+    hex=""
+    for i in {1..32}; do
+        rand=$((RANDOM % 16))
+        hex+="${chars[$rand]}"
+    done
+    echo "$hex"
+}
+
+#
+# create a file with the public key of scontain gpg signer key
+#
+
+function create_gpg_verification_key() {
+    local tmp_gpg
+
+    export gpg_public_key_file="$(mktemp)-pub.gpg"
+    tmp_gpg="${gpg_public_key_file}.base64"
+
+    cat > $tmp_gpg <<EOF
+mQINBF5tGZkBEACPxl1oBdP5xKWB/EaEkW3UwMEnpNJeOFjVysT5B3ZfK6OGqtZDYKsQEGtptJ54
+Wy9dvd33UpZUNRmCL6X1GeEd/DLd7t+sk3Cm414pC9Qmx9tkTeLMkCZb6QHufblz3kJkV1E86vre
+PbrVTZ2q4cLJl4G/IlNKwHsY/7/4yEcBkEZ8L1TOgsotnLnuYOlf/XbPcF4tqdEV+H1nTHGjwcSP
+qbIHDA3N8a0aNELRvcTH5tj9YluSUCgC4S4EqwgL09BfOITN6lSJihgZMqP9sHlbj4SWfxvVOyXd
+7lSpNSB+nq0DQS1q6lNURnynTZYDwsbmKWbtd/qft2Z1Rs3lBIsIM/sVyVGRS5oOuzVo5CHuhfuP
+1LUCPQpRXamJvS64Tx0eWl4s+HD37Cz1H9MN0zo9dScSEi3c5pJo8GgH6FQyM0miqXmP5VmuUFN8
+Qe76wkrBE+TJGSSiLewBCOlowrE1m8fX9ZZ0V17sJx9ya0jvinwXMEzN9zLppychdMyJoLEyGplr
+3swCYTPytRwdwOq87srkd63LvXSXg29ozWt1Rx25VagBZflZXg1H0dHDgNvzxsFwEQWYDBmG3vh5
+i75Ny7DfrRJVeMbPds7McWEiusO/Rk8JXpLJqwA2fjkUC2kavzfCrVMxJ927QJyaOXGx53nXDBSg
+wmjC3yYRK4LohQARAQABtC5DaHJpc3RvZiBGZXR6ZXIgPGNocmlzdG9mLmZldHplckBzY29udGFp
+bi5jb20+iQJOBBMBCgA4FiEEW8rTHcyNXXIre3q9Lr4E58yBbTIFAl5tGZkCGwMFCwkIBwIGFQoJ
+CAsCBBYCAwECHgECF4AACgkQLr4E58yBbTKwVg//SJ6T9x+7YItMCevjU6td7wDJKwOyvFINXP/0
+ktDRGfrdy+YDCMkuQUMxkL0j65/AjaicndmvEj/ThGN7cJfyA2FrnmL402glJPWScL+LiMiwonBn
+h6Y9hkTTRmbDPBNuPaa+fXdqfZRfa2Pzhj8aW7e3kKChxGCoLG4uM5+yEI07LsmsIG8VkkWTplhG
+LQaXc3wRN4oMTNflG8OlmvtooxpuGNgOoAgj7k1T35LjoZ+mE9mNH8a41eDk3c2PAB3t7/rYxstK
+CGPcJd0K9R5ZXDlkbqvDKuAO83E0pI0zw1BsksA3W5XfmCo8Jf2UqtWW4XBxWJvDS8ywVTXduZR8
+ean681VEICrYUBtTWDrAfWKGNNQMD7w6KWK8gwWRTqECr2eSzYkaFX7tyd2Dc47/R8uTHXgg4chR
+Ke0oL+yiAmPqcOjwEn2Y0e7I2Wj70N69EBcf/lFXy1Q67RGO+oCifwjhwkYkELdRt5NVpaUnnEkS
+2p82fOomo2Vxrh8wGaTABub+fzLYicnKda1zO7VjzrOmjC0GMo8wApyNJhv+JfWXDJ1pOCpRIuMc
+PJykpFXTRw7KN88924etDM8j1sOBV/YcL8nPiRMdAzp4X1fg2QNndiGaWDejoD8NF3yVssInKmg+
+neRUytPu75nke9AcdaY6bMlTWbGNOekuwe1oRfC5Ag0EXm0ZmQEQAKXucWCoTWN7jViqpS3NnLgF
+JfPvsvePT99WRUHIODuXTskLMipLG41U7s0E3IM3orY00GlmI3IfNjzPKMQV98yfldgZ1gnA91Uy
+UnrjI+7kPr6wa5cDdLMNj+BUcp2V6t8qUE2YT7v2af4VgIWUnXnhQAx/DNhncUpPCQqJ8kZ3s9LA
+Ezy74Cqgu/0/3v5wVTszh67uMwfm1QMj0u2hzr3ZkEHnVdGpWfvG5dQj+3WqLT3miVcNFIVPgY2P
+hiivlekxn1MX9BG4kn/QtibNmBZvLyj0F0mssUKN+DFr7M7JxTlNxxDhtvaIAllXsBs06zPxKTou
+A2Q1iNZQYoVr43MTocfvbY8LlB618qmVUO/8hQvSl8Fh72uE986xB4+a1PDWJkDRlHxi409Y1mXR
+pkCNWrA5xvcX0IHgpnwR/NxFX6SvAuwNeCC6fo9zQ5GoZWnmCrI0dthLfluslrK4uvMdpDqLYpVm
+i6B1uB+oOBV9umIB1NhMi6u6SaQJ8pefLveGDCqmCbF5yAuVXXT+n2XQZBeOefiyAhtDwqDKXvI5
+M2Smw5nzMqgXu5bs5WLMNqn0zvphKam11bF0LHtxp/UCZXO+o6L22le2luMxFjDMcI0Sah73Jwno
+hqFkxG34tws0WR5lioi+PgoEa0jXYGexyFO74Xvo8XWH5TjiS3dTABEBAAGJAjYEGAEKACAWIQRb
+ytMdzI1dcit7er0uvgTnzIFtMgUCXm0ZmQIbIAAKCRAuvgTnzIFtMjaBD/9iYzR0h6tg+uVG8FA5
+iy/wi/Qb8C86UnSr73sZZJlH17rVjz51httE7fmN48QkQ2VKYRDh50NWC05W/2cRbtIwqmlkXzAS
+ys04uBuROMAj5zeM4v9SqLCSWUguO1LItOuFqqqML12uwm3EfhmTmseZB2LND+ZxZG8OiZeun1d1
++CyZHrgn+xQ5SyUt9bzdZp/JAu05iN/e7E9/zrulCW0RPtOl8C4lgeaoNIBOAOYrvjUtD8vvNuiO
+S6goGwsUUMhap8UdW1O8b+acpQaRcdlNxaNXoz/TpG7GeguXyyWvHNKHjlV/PMX35ItVGl9FZ1ph
+zNe+xTBjpI7U505bTfekfyS5Y6kTI0v+HvptNZFNF7Iubssl0tCxp0u+iPMz6xuIy2FWGQIWDUta
+16CcaolmluBmoFJ4BfAjh4ur60jEfe+UaHyat09khfF6HRZpIM7henB7C+GFeVROHMRdQaw1y7EF
+7xgN6hxuM5OTWwlYxQkNu84hWzjxwhj6/KKV8Tz1vmJPglChTQLY7COpD4q/vOQmJyGFCDu3RYxb
+rIIkr/itIAyQXgsxtlqTVAyU6F7r3pIM91nj8QxYNW5c3os7Z0gdXpe3Dbdvt3vn4MZqhB/9haIO
+NyTbLJcUrjHio1AmCo3k1ued73dDdneWdn7TKITKfU/8lb9v6XEdkSHJxLkCDQRebRmZARAAiPvf
+2FfDfORqIlGk5Is/5MaBTzrQj/VABF5HzsOqVEKF557CVmKu5qa0B7W1jsrPKyWkqTzGUyfejSgI
+YUBAocaaQHE/mIS3CQLwKDPRIRg4onzHXZjmjcwDjjFcGMjakMkFgNgfMw61LT2LH621g/vLm0qq
+KClWYqVY++yoJcJC1RSiNKam24bsYwZeGaGHCulga7igqB1U1dW8KsyBzW2Z5I1yXWc+fgm3Q4DS
+ulpiuSMKGSmAg/uNUfVyFEjIFBQk2Ls+8XvuGux5+0ICig6gLazb3fdymtmBi7VIsozsp2r5KC4h
++4QqZjDZ6QOjBFScB79XDDQ/hLJMfYerWBM5LyMKuLnsFVa6mQckpikpyl2BujlNTzFD58hDcpsm
+qI3BXbqqbGEQWuaoTNWVqQv1qu9mwqDacTthX9fdTGnzibbm2/0hQSpbQ3ZexGvzzhT4bB1Cgc8X
+7C2vPclpi8H4kzcOo7gIicwJuwLaOD8QRGqKPZIta32Agzb3tDB2MXGuhOL2eCSAx2aDosAzlLD6
+2mnrHelc6vKchhViQBiZKPFiNSL7KN+vEbhstB+mx9UltcopwcuynoTPm8HuVpM2HFJLPlkK5gTb
+xtCUlW9fGREx2jwqioYuju4mfS2kcbqR8O8+lvnkoiIYxLk9x+SXTOCtWq8wG+3uqiCvqd0AEQEA
+AYkCNgQYAQoAIBYhBFvK0x3MjV1yK3t6vS6+BOfMgW0yBQJebRmZAhsMAAoJEC6+BOfMgW0yn70P
+/AqRl7P7d2NX1Y0ZAqm2XlHrO6q+yltKC27Yu+mvzo0vIpiCsx2moUwXKpnbUE+ovQieDtRswvDz
+6LWVyvM/c3ogQJ3/cLbu9aAsTkUF1TFWFyYs9WGDmt+mv9q1+99HdPw1dG683B0gEjQxIuKeKiii
+e64SdHNU51FM81HjXh94kFj5HPQ0QJ1/DzXdFLu9aG3Ja5Nl2mMK+BOY1B3SXNZGwoSk0oZM3Su1
+VkvxlQlLi8B8CBLUEE+JNhw1qNx55LGZJSB95DoIrvloADqy7braEKNgDZ3GBWjupMt6MeX2n/Fk
+R4xMEkNO4Qlwy7eARz1Yx9WTjFT8L6a/xp2PEKe8zmTkObUQzRTwDvcoXbl/B3nT0w/RlbLaXEtd
+dTC5h5UPz9avSlLYSblGFxf84PXuEKIKWpDQzybMAfRwqBc5OTOnkkl6OXYiXLxdVEsaRlTtYHI4
+QSvBZDzbO12jXPv78zVVkRjr7mljcPMB2iDRSeWO073ov1oxEeCmzzhyq8/7q0SrjR3J6g3b4k15
+NSHb32Obz9x+L+3Oo/r5oYf+T0B51YvOfz6O9BxoI3icZL1KJ2MtbtmYkE/UNNnNB4XApQGoZk5i
+BtcmftSsf9VCHB0IDPbyH6sro8MNyF81i5MewmQ99tdYE9UIiwNYa/10PRUClKWrEvxIOAK/K3sW
+EOF
+    cat "$tmp_gpg" | base64 -d > $gpg_public_key_file
+}
+
+#
+# verify that a container image was properly signed by Scontain
+#
+
+function verify_image() {
+    local image_name
+    image_name="$1"
+    if [[ "$image_name" == "" ]]; then
+        error_exit "The name of the image for which we should verify the signature, was empty. Exiting."
+    fi
+
+    if [[ ( "$IMAGE_REPO" != "$SCONTAIN_IMAGE_REPO" || "$IMAGE_PREFIX" != "" ) && "$cosign_public_key_file" == "" ]]; then
+        warning "Skipping image verification of image '$image_name' since the public key is unknown (the key can be specified with $verify_sign_key_flag)"
+        return
+    fi
+
+    verbose "Verifying the signature of image '$image_name'"
+    docker pull "$image_name" >/dev/null
+    if [[ "$cosign_public_key_file" == "" ]]; then
+        create_cosign_verification_key
+    fi
+    cosign verify --key "$cosign_public_key_file" "$image_name" >/dev/null 2> /dev/null || error_exit "Failed to verify signature of image '$image_name'! Exiting! Please check that 'cosign version' shows a git version >= 2.0.0. Also ensure that there is no field 'credsStore' in '$HOME/.docker/config.json'"
+    verbose "  verification was successful"
+}
+
+#
+# verify that all needed images in this run are signed by Scontain
+#
+
+function check_image_signatures() {
+    verbose "Verify image signatures"
+    verify_image "$SCONECLI_IMAGE"
+    verify_all_cas_images
+    if [[ "${SVC}" != "cas" ]]; then
+        error_exit "Unknown service $SVC"
+    fi
+}
+
+#
+# verify that all needed cas related images in this run are signed by Scontain
+#
+
+function verify_all_cas_images() {
+    verbose "--- Verify signatures of required cas related images"
+    verify_image "$CAS_IMAGE"
+    verify_image "$BACKUP_CONTROLLER_IMAGE"
+    if [[ $do_cas_upgrade == 1 ]]; then
+        verify_image "$CAS_UPGRADE_IMAGE"
+        verify_image "$BACKUP_CONTROLLER_UPGRADE_IMAGE"
+    fi
+}
+
+#
+# Public Key used to sign manifests
+#
+
+SIGNER="5BCAD31DCC8D5D722B7B7ABD2EBE04E7CC816D32"
+
+
+#
+# verify signed manifests
+#
+
+function verify_file() {
+    file=$1
+
+    if [[ "$gpg_public_key_file" == "" ]]; then
+        create_gpg_verification_key
+    fi
+    LC_ALL=en_US.UTF-8 gpg --no-default-keyring --keyring $gpg_public_key_file --verify --status-fd=1 "$file.asc" "$file" 2> /dev/null | grep -e " VALIDSIG $SIGNER" >/dev/null
+}
+
+
+# download/copy files
+#
+# Arguments:  url, output
+#
+# - url:
+#   - **remote file**  starts with https://
+#   - **local file** does NOT start with https://
+# - output:
+#   - file location to store or copy the file
+#
+# This function download remote files and verify signature.
+# This function copies local files, i.e., does NOT verify any signatures.
+#
+
+function download_file() {
+    url="$1"
+    output="$2"
+
+    verbose "  Downloading $url"
+    if [[ "$url" == https://* ]] ; then
+        curl -fsSL "$url"  -o "$output" || error_exit "Failed to download file $url."
+        curl -fsSL "$url.asc"  -o "${output}.asc" || error_exit "Failed to download signature file $url.asc to ${output}.asc"
+    else
+        cat $url > "$output" || error_exit "Failed to read local file $url"
+        cat "${url}.asc" > "${output}.asc" || true
+    fi
+    if [[ "$url" == https://raw.githubusercontent.com/scontain* ]]; then
+        verbose "  Verifying signature of $url"
+        verify_file "$output" || error_exit "Signature of file '$file' is incorrect."
+    else
+        # we try to verify also in this case since it might be a local scontain file with valid signature
+        verify_file "$output" || warning "  Skipping signature verification for $url, due to unknown origin."
+    fi
+    chmod og-rwx "$output"
+}
+
+# print an error message on an error exit
+trap 'last_command=$current_command; current_command=$BASH_COMMAND' DEBUG
+trap 'if [ $? -ne 0 ]; then echo -e "${RED}\"${last_command}\" command failed - exiting.${NC}"; if [ $SERVICE_PID != 0 ] ; then kill $SERVICE_PID ; fi ; fi' EXIT
+
+
+#
+# get_name_from_dns returns the name of the service specified by the dns name 'dns_name' ($1)
+#
+
+function get_name_from_dns() {
+    local dns_name
+    dns_name=$1
+
+    if [[ "$dns_name" == "" ]]; then
+        error_exit "get_name_from_dns: No dns name was provided"
+    fi
+    IFS='.' read -r -a parts <<< "$dns_name"
+    echo ${parts[0]}
+}
+
+
+#
+# get_namespace_from_dns returns the namespace of the service specified by the dns name 'dns_name' ($1), or default_namespace ($2) if none was found
+#
+
+function get_namespace_from_dns() {
+    local dns_name
+    local default_namespace
+
+    dns_name=$1
+    default_namespace=$2
+
+    if [[ "$dns_name" == "" ]]; then
+        error_exit "get_namespace_from_dns: No dns name was provided"
+    fi
+    if [[ "$default_namespace" == "" ]]; then
+        error_exit "get_namespace_from_dns: No default namespace was provided"
+    fi
+    IFS='.' read -r -a parts <<< "$dns_name"
+    if [[ ${#parts[@]} != 1 ]]; then
+        echo "${parts[1]}"
+    else
+        echo "$default_namespace"
+    fi
+}
+
+
+#
+# generic port-forwarding using kubectl port-forward
+#
+
+function port_forward() {
+    local resource_kind
+    local resource_identifier
+    local namespace
+    local local_port
+    local remote_port
+
+    resource_kind=$1
+    resource_identifier=$2
+    namespace=$3
+    local_port=$4
+    remote_port=$5
+
+    kubectl port-forward $resource_kind/$resource_identifier $local_port:$remote_port --namespace "$namespace" --address=0.0.0.0 > /dev/null &
+    SERVICE_PID=$!
+    sleep 5
+    kill -0 $SERVICE_PID &>/dev/null || error_exit "It looks like that either port $local_port is not available on your local machine or the $resource_kind $resource_identifier in namespace $namespace is not running. Bailing!"
+}
+
+#
+# port-forwards to the standard cas client port of the resource_kind ($1) identified by resource_identifier ($2)
+#
+
+function cas_port_forward() {
+    local resource_kind
+    local resource_identifier
+    resource_kind=$1
+    resource_identifier=$2
+    port_forward $resource_kind $resource_identifier $NAMESPACE $LOCAL_CAS_CLIENT_PORT $CAS_CLIENT_PORT
+}
+
+#
+# port-forwards to the standard cas client port of the cas pod
+#
+
+function cas_pod_port_forward() {
+    cas_port_forward "pod" "${NAME}-0"
+}
+
+#
+# port-forwards to the standard cas client port of the service $SVCNAME
+#
+
+function cas_svc_port_forward() {
+    if [[ $SVCNAME == "" ]] ; then
+      error_exit "SVCNAME is not defined - internal error"
+    fi
+    cas_port_forward "service" $SVCNAME
+}
+
+#
+# port-forwards to the standard cas client port of the service addressed by arg 1
+#
+
+function cas_addr_port_forward() {
+    cas_port_forward "service" $1
+}
+
+function check_port_forward() {
+    local target_port
+    target_port=$1
+
+    verbose "checking if portforward already exists - otherwise, this could result in our port-forward to fail"
+    # The local port must be free: if target_port is 8081, cover cases like
+    # "8081", "8081:8080", "8081:8081",
+    # but do not complain about "8181:8080", for instance.
+    if ps axx | grep -E "kubectl .*port-forward.* $target_port(:|( |$))" | grep -v grep ; then
+        error_exit "It looks like port-forwarding already running (please check with ps axx | grep port-forward ) - this might prevent us or the other program from running. Bailing!"
+    fi
+}
+
+
+#
+# retrieve_status_field retrieves a field 'field' ($4) from the status of the resource 'name' ($2) of kind 'kind' ($1) in namespace 'namespace' ($3)
+#
+
+function retrieve_status_field() {
+    local kind
+    local name
+    local namespace
+    local field
+    
+    kind=$1
+    name=$2
+    namespace=$3
+    field=$4
+    kubectl get $kind $name -n $namespace -o jsonpath="{.status.$field}"
+}
+
+
+#
+# check_resource_exists checks whether the resource 'name' ($2) of kind 'kind' ($1) in namespace 'namespace' ($3) exists 
+#
+
+function check_resource_exists() {
+    local kind
+    local name
+    local namespace
+
+    kind=$1
+    name=$2
+    namespace=$3
+
+    local exists
+    local json
+
+    exists=1  json=$(kubectl get "$kind" "$name" --namespace "$namespace" -o json 2>/dev/null) || exists=0
+    echo $exists
+}
+
+
+#
+# wait_for_resource_exists waits for resource 'name' ($2) of kind 'kind' ($1) in namespace 'namespace' ($3) to be created
+#
+
+function wait_for_resource_exists() {
+    local kind
+    local name
+    local namespace
+
+    kind=$1
+    name=$2
+    namespace=$3
+
+    dots="."
+    echo -n "Waiting for $kind $name in namespace $namespace to be created $dots"
+    exists=0
+    while [[ ! $exists  ]] ; do
+        sleep 1
+        exists=$(check_resource_exists "$kind" "$name" "$namespace")
+        echo -n "."
+    done
+    echo "OK"
+}
+
+
+#
+# wait_for_resource_status_field waits for the status field 'field' ($4) of resource 'name' ($2) of kind 'kind' ($1) in namespace 'namespace' ($3) to become equal to 'field_value' ($5)
+#
+
+function wait_for_resource_status_field() {
+    local kind
+    local name
+    local namespace
+    local field
+    local target_value
+
+    local value
+    local dots
+
+    kind=$1
+    name=$2
+    namespace=$3
+    field=$4
+    target_value=$5
+
+    dots="."
+    value=$(retrieve_status_field "$kind" "$name" "$namespace" "$field")
+    echo "Waiting for the status field '$field' of $kind '$name' in namespace '$namespace' to become '$target_value'"
+    echo -n "Current value: $value $dots"
+    while [[ "$value" != "$target_value"  ]] ; do
+        sleep 1
+        dots="${dots}."
+        if [[ ${#dots} == 20 ]]; then
+            dots="."
+        fi
+        value=$(retrieve_status_field "$kind" "$name" "$namespace" "$field")
+        echo -en "\r\e[KCurrent value: $value $dots"
+    done
+    echo "OK"
+}
+
+
+#
+# wait_for_non_target_resource_status_field waits for the status field 'field' ($4) of resource 'name' ($2) of kind 'kind' ($1) in namespace 'namespace' ($3) to not be equal to 'non_target_value' ($5). If no non_target_value is provided it waits for the status field to have a non-empty value.
+#
+
+function wait_for_non_target_resource_status_field() {
+    local kind
+    local name
+    local namespace
+    local field
+    local non_target_value
+
+    local value
+    local dots
+
+    kind=$1
+    name=$2
+    namespace=$3
+    field=$4
+    non_target_value=$5
+
+    dots="."
+    value=$(retrieve_status_field "$kind" "$name" "$namespace" "$field")
+    echo "Waiting for the status field '$field' of $kind '$name' in namespace '$namespace' to not be equal to $non_target_value"
+
+    while [[ "$value" == "$non_target_value"  ]] ; do
+        sleep 1
+        dots="${dots}."
+        if [[ ${#dots} == 20 ]]; then
+            dots="."
+        fi
+        value=$(retrieve_status_field "$kind" "$name" "$namespace" "$field")
+        echo -en "\r\e[K$dots"
+    done
+    echo "OK"
+}
+
+
+#
+# wait_for_resource_phase waits for resource 'name' ($2) of kind 'kind' ($1) in namespace 'namespace' ($3) to enter phase 'target_phase' ($4)
+#
+
+function wait_for_resource_phase() {
+    local kind
+    local name
+    local namespace
+    local target_phase
+
+    kind=$1
+    name=$2
+    namespace=$3
+    target_phase=$4
+    wait_for_resource_status_field "$kind" "$name" "$namespace" "phase" "$target_phase"
+}
+
+
+#
+# wait_for_resource_healthy waits for resource 'name' ($2) of kind 'kind' ($1) in namespace 'namespace' ($3) to enter state 'HEALTHY'
+#
+
+function wait_for_resource_healthy() {
+    local kind
+    local name
+    local namespace
+
+    kind=$1
+    name=$2
+    namespace=$3
+
+    wait_for_resource_status_field "$kind" "$name" "$namespace" "state" "HEALTHY"
+}
+
+
+#
+# wait_for_resource_exists_and_healthy waits for resource 'name' ($2) of kind 'kind' ($1) in namespace 'namespace' ($3) to be created and become healthy
+#
+
+function wait_for_resource_exists_and_healthy() {
+    local kind
+    local name
+    local namespace
+
+    kind=$1
+    name=$2
+    namespace=$3
+
+    wait_for_resource_exists "$kind" "$name" "$namespace"
+    wait_for_resource_healthy "$kind" "$name" "$namespace"
+}
+
+
+# a precheck to ensure that all directories exist (since we might need sudo to create)
+
+function check_prerequisites() {
+    exit_msg=""
+    verbose "Checking that we have access to kubectl"
+    if ! command -v kubectl &> /dev/null
+    then
+        exit_msg="Command 'kubectl' not found! "
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install 'kubectl'- see https://kubernetes.io/docs/tasks/tools/${NC}"
+    fi
+
+    verbose "Checking that we have access to helm"
+    if ! command -v helm &> /dev/null
+    then
+        exit_msg="${exit_msg} Command 'helm' not found! "
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install  'helm' - see https://helm.sh/docs/intro/install/${NC}"
+    fi
+
+    exit_msg=""
+    verbose "Checking that we have access to jq"
+    if ! command -v jq &> /dev/null
+    then
+        exit_msg="${exit_msg}Command 'jq' not found! "
+        echo -e "${RED}${exit_msg}${NC}"
+        echo -e "- ${ORANGE}Please install 'jq'- see https://stedolan.github.io/jq/download/${NC}"
+    fi
+
+    verbose "Checking that you have access to a Kubernetes cluster."
+    if ! kubectl get pods &> /dev/null
+    then
+        echo -e "${RED}It seems that you do not have access to a Kubernetes cluster!${NC}"
+        echo -e "- ${ORANGE}Please ensure that you have access to a Kubernetes cluster${NC}"
+        exit_msg="${exit_msg}No access to Kubernetes cluster! "
+    fi
+
+    verbose "Checking that you have access to cosign."
+    if ! cosign version &> /dev/null
+    then
+        echo -e "${RED}It seems that you do not have access to cosign!${NC}"
+        echo -e "- ${ORANGE}Please install 'cosign'- see https://docs.sigstore.dev/cosign/installation/${NC}"
+        exit_msg="${exit_msg}No access to cosign! "
+    fi
+
+
+    verbose "Checking that you have access to gpg."
+    if ! gpg --version &> /dev/null
+    then
+        echo -e "${RED}It seems that you do not have access to gpg!${NC}"
+        echo -e "- ${ORANGE}Please install 'gpg'- see https://docs.releng.linuxfoundation.org/en/latest/gpg.html${NC}"
+        exit_msg="${exit_msg}No access to gpg! "
+    fi
+
+    if [[ "$exit_msg" != "" ]] ; then
+        error_exit "$exit_msg"
+    fi
+
+    verbose "Checking that required directories exist."
+    mkdir -p "$TARGET_DIR/owner-config" || error_exit "Failed to create directory '$TARGET_DIR/owner-config' - please create manually - this might require sudo"
+    mkdir -p "$TARGET_DIR/identity" || error_exit "Failed to create directory '$TARGET_DIR/identity' - please create manually - this might require sudo"
+
+}
+
+function session_hash {
+
+    if [[ "$1" == "" ]] ; then
+        error_exit "session_hash() requires Policy argument"
+    else
+        export POLICY="$1"
+    fi
+    verbose "POLICY=$POLICY"
+
+    if [[ "$2" != "" ]] ; then
+        CAS_NAME="$2"
+    else
+        error_exit "session_hash() requires SCONE CAS argument"
+    fi
+
+    verbose "session_hash of $POLICY of CAS $CAS_NAME.$NAMESPACE"
+
+    check_port_forward "$LOCAL_CAS_CLIENT_PORT"
+    cas_addr_port_forward $CAS_NAME
+
+    touch "${TARGET_MOUNT_DIR}/identity/config.json" || error_exit "It seems you are not the owner of file '${TARGET_MOUNT_DIR}/identity/config.json' - please change owner of this file"
+
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    docker run --rm --platform linux/amd64  \
+        --add-host=host.docker.internal:host-gateway --network host \
+        --user $(id -u):$(id -g) \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -e SCONE_CLI_CONFIG="/identity/config.json" \
+        -e SCONE_NO_TIME_THREAD=1 \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="sim" \
+        -e NAME="$NAME" \
+        ${SCONECLI_IMAGE} \
+        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null  ; scone session read $POLICY > /dev/null ;   scone session read $POLICY > /identity/session.tmp;  scone session verify /identity/session.tmp ; "
+
+    chmod og-rwx "${TARGET_MOUNT_DIR}/identity/config.json"
+
+    if [[ $SERVICE_PID != 0 ]] ; then
+        verbose "Shutting down port-forwarding"
+        kill $SERVICE_PID
+    fi
+}
+
+
+function get_policy_and_its_hash() {
+    local policy_name
+    local relative_policy_target_dir
+    local policy_target_file_name
+
+    policy_name=$1
+    relative_policy_target_dir=$2
+    policy_target_file_name=$3
+
+    touch "${TARGET_MOUNT_DIR}/identity/config.json" || error_exit "It seems you are not the owner of file '${TARGET_MOUNT_DIR}/identity/config.json' - please change owner of this file"
+
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    docker run --rm --platform linux/amd64   \
+        --add-host=host.docker.internal:host-gateway --network host \
+        --user $(id -u):$(id -g) \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/"$relative_policy_target_dir":/$relative_policy_target_dir \
+        -e SCONE_CLI_CONFIG="/identity/config.json" \
+        -e POLICY_NAME="$policy_name" \
+      	-e OUT_FILE="$policy_target_file_name" \
+        -e OUT_DIR="/$relative_policy_target_dir" \
+        -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+        -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="auto" \
+        -e SCONE_NO_TIME_THREAD=1 \
+        -e LOCAL_CAS_CLIENT_PORT="$LOCAL_CAS_CLIENT_PORT" \
+        -e NAME="$NAME" \
+        ${SCONECLI_IMAGE} \
+        sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null ; scone session read $POLICY_NAME > /dev/null 2> /dev/null ; scone session read $POLICY_NAME > ${OUT_DIR}/${OUT_FILE} ; export HASH=`scone session verify ${OUT_DIR}/${OUT_FILE}` ; echo $HASH' || echo ""
+
+    chmod og-rwx "${TARGET_MOUNT_DIR}/identity/config.json"
+}
+
+function enable_cas_port_forwarding() {
+    local pod_or_service
+    local pod_or_svc_name
+    local default_name
+
+    pod_or_service=$1
+    pod_or_svc_name=$2
+
+    if [[ "$pod_or_service" == "" ]]; then
+        pod_or_service="service"
+    fi
+    if [[ "$pod_or_service" == "pod" ]]; then
+        default_name="$NAME-0"
+    elif [[ "$pod_or_service" == "service" ]]; then
+        default_name="$NAME"
+    else
+        error_exit "We do not support port-forwardning to kubernetes resources of kind '$pod_or_service' - only 'pod' and 'service' are allowed kinds"
+    fi
+
+    if [[ "$pod_or_svc_name" == "" ]]; then
+        pod_or_svc_name=$default_name
+    fi
+
+    verbose "Enabling Port-Forwarding to CAS $pod_or_service $pod_or_svc_name in namespace $NAMESPACE"
+    check_port_forward "$LOCAL_CAS_CLIENT_PORT"
+    kubectl port-forward $pod_or_service/$pod_or_svc_name $LOCAL_CAS_CLIENT_PORT:$CAS_CLIENT_PORT --namespace "$NAMESPACE" --address=0.0.0.0 &
+    SERVICE_PID=$!
+    sleep 5
+    kill -0 $SERVICE_PID &>/dev/null || error_exit "It looks like that either port $LOCAL_CAS_CLIENT_PORT is not available on your local machine or CAS ${NAME}'s $pod_or_service $pod_or_svc_name is not running. Bailing!"
+    echo $SERVICE_PID > "$SERVICE_PID_FILE"
+}
+
+function wait_for_cmd_success() {
+    local cmd
+    local xpid
+    cmd=$1
+    echo -n "Waiting for $cmd to succeed..."
+    while ! $($cmd >/dev/null) ; do
+        sleep 0.5;
+        echo -n .
+    done
+    SERVICE_PID_EXISTS="true"
+    echo "OK"
+}
+
+function enable_cas_port_forwarding_with_retry() {
+    wait_for_cmd_success "enable_cas_port_forwarding pod"
+}
+
+function check_if_provisioned {
+    # we ask the Kubeapi if the CAS is provisioned
+    RESULT=$(kubectl get cas "$NAME" -n "$NAMESPACE" -o json | jq -r ."status"."provisioned" )
+    if [[ $RESULT == "Yes" ]] ; then
+        echo -en "${BLUE}YES${NC}\n"
+        return 0
+    else
+        echo "$RESULT"
+        echo -en "${RED}NO${NC}\n"
+        trap '' EXIT
+        return 1
+    fi
+}
+
+function check_if_provisioned_explicit {
+
+    verbose "Checking if CAS $NAME in namespace $NAMESPACE is provisioned"
+
+    if ! kubectl get cas "$NAME" -n "$NAMESPACE" 2> /dev/null >/dev/null
+    then
+        warning "No CAS $NAME is running in namespace $NAMESPACE"
+        trap '' EXIT
+        return 1
+    fi
+
+    SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+    check_port_forward "$LOCAL_CAS_CLIENT_PORT"
+    cas_svc_port_forward
+
+    touch "${TARGET_MOUNT_DIR}/identity/config.json" || error_exit "It seems you are not the owner of file '${TARGET_MOUNT_DIR}/identity/config.json' - please change owner of this file"
+
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    RESULT=$(docker run --rm --platform linux/amd64 \
+        --add-host=host.docker.internal:host-gateway --network host \
+        --user $(id -u):$(id -g) \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
+        -e SCONE_CLI_CONFIG="/identity/config.json" \
+        -e LOCAL_CAS_CLIENT_PORT="$LOCAL_CAS_CLIENT_PORT" \
+        -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
+        -e POLICY_NAME="$POLICY_NAME" \
+        -e SCONE_LOG="ERROR" \
+        -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+        -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+        -e SCONE_NO_TIME_THREAD=1 \
+        -e NAME="$NAME" \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="sim" \
+        ${SCONECLI_IMAGE} \
+        bash -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal:$LOCAL_CAS_CLIENT_PORT ;  scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "CAS is NOT provisioned" ; else  echo "CAS is provisioned" ; fi ' | tail -1 )
+
+    chmod og-rwx "${TARGET_MOUNT_DIR}/identity/config.json"
+
+    kill $SERVICE_PID
+    if [[ $RESULT == "CAS is provisioned"* ]] ; then
+        echo -en "${BLUE}YES${NC}\n"
+        return 0
+    else
+        echo "$RESULT"
+        echo -en "${RED}NO${NC}\n"
+        trap '' EXIT
+        return 1
+    fi
+}
+
+function print_cas_keys {
+
+    verbose "CAS SVC: name = $NAME, namespace = $NAMESPACE"
+
+    if ! kubectl get cas "$NAME" -n "$NAMESPACE" 2> /dev/null >/dev/null
+    then
+        warning "No CAS $NAME is running in namespace $NAMESPACE"
+        trap '' EXIT
+        exit 1
+    fi
+
+    SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+    check_port_forward "$LOCAL_CAS_CLIENT_PORT"
+    cas_svc_port_forward
+
+    touch "${TARGET_MOUNT_DIR}/identity/config.json" || error_exit "It seems you are not the owner of file '${TARGET_MOUNT_DIR}/identity/config.json' - please change owner of this file"
+
+    docker pull ${SCONECLI_IMAGE} > /dev/null
+    docker run --rm --platform linux/amd64  \
+        --add-host=host.docker.internal:host-gateway --network host \
+        --user $(id -u):$(id -g) \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
+        -e SCONE_CLI_CONFIG="/identity/config.json" \
+        -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
+        -e POLICY_NAME="$POLICY_NAME" \
+        -e SCONE_LOG="ERROR" \
+        -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+        -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+        -e SCONE_NO_TIME_THREAD=1 \
+        -e NAME="$NAME" \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="sim" \
+        ${SCONECLI_IMAGE} \
+        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null 2> /dev/null || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT > /dev/null 2> /dev/null || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }   ; scone cas set-default host.docker.internal:$LOCAL_CAS_CLIENT_PORT ; echo -en 'export CAS_KEY=\"' ; scone cas show-identification -c  | tr -d '\n'  ; echo -en '\"\nexport CAS_SOFTWARE_KEY=\"' ; scone cas show-identification -s | tr -d '\n' ; echo -en '\"\nexport CAS_SESSION_ENCRYPTION_KEY=\"'; scone cas show-identification --session-encryption-key  | tr -d '\n' ; echo -en '\"\nexport CAS_CERT=\"' ; scone cas show-certificate ; echo -en '\"\n' "
+
+    chmod og-rwx "${TARGET_MOUNT_DIR}/identity/config.json"
+
+    kill $SERVICE_PID
+    trap '' EXIT
+    exit 0
+
+}
+
+# NOTE: verbose will only show up if you execute with "V=1 ./kubectl-kubectl"
+source "$CONFIG_FILE" 2>/dev/null || verbose "Note: could not load config file \"$CONFIG_FILE\" - Ignoring."
+
+
+function post_provisioning() {
+    export SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+    check_port_forward "$LOCAL_CAS_CLIENT_PORT"
+    cas_svc_port_forward
+
+    export POLICY_NAME="cas-owner/primary-backup"
+    export SCONE_CLI_MRENCLAVE="$(docker run --platform linux/amd64 --pull always --rm --entrypoint scone -e SCONE_HASH=1 "$BACKUP_CONTROLLER_IMAGE" cas | tr -d '\r')"
+
+    post_provision_attest
+    upload_post_provisioning_sessions
+    enable_post_provisioning_features
+}
+
+function post_provision_attest() {
+    touch "${TARGET_MOUNT_DIR}/identity/config.json" || error_exit "It seems you are not the owner of file '${TARGET_MOUNT_DIR}/identity/config.json' - please change owner of this file"
+
+    docker run --rm --platform linux/amd64  \
+        --add-host=host.docker.internal:host-gateway --network host \
+        --user $(id -u):$(id -g) \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -e SCONE_CLI_CONFIG="/identity/config.json" \
+        -e LOCAL_CAS_CLIENT_PORT="$LOCAL_CAS_CLIENT_PORT" \
+        -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+        -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+        -e SCONE_NO_TIME_THREAD=1 \
+        -e POLICY_NAME="$POLICY_NAME" \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="sim" \
+        -e NAME="$NAME" \
+        ${SCONECLI_IMAGE} \
+        sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal:$LOCAL_CAS_CLIENT_PORT  ;'
+
+    chmod og-rwx "${TARGET_MOUNT_DIR}/identity/config.json"
+}
+
+
+function enable_post_provisioning_features() {
+    # todo: next version - use encrypted policy and upload encrypted policy
+
+    kubectl get cas $NAME  --namespace "$NAMESPACE"
+
+    if [[ $NO_BACKUP -eq 1 ]]; then
+        patch_file_url=$CAS_PATCH_PROBES_JSON_URL
+    else
+        patch_file_url=$CAS_PATCH_PROBES_AND_BACKUP_JSON_URL
+    fi
+    patch_template_file="$TARGET_DIR/owner-config/cas-$NAMESPACE-$NAME-$VERSION-patch.json.template"
+    patch_file="$TARGET_DIR/owner-config/cas-$NAMESPACE-$NAME-$VERSION-patch.json"
+    verbose "Patching CAS CR $NAME in namespace $NAMESPACE (template patch file: $patch_file_url, final patch file: $patch_file)"
+    download_file $patch_file_url $patch_template_file
+    SCONE="\$SCONE" envsubst < "$patch_template_file" > "$patch_file"
+
+    local retry=$K_PROVISION_MAX_RETRIES
+    until kubectl patch cas $NAME --namespace $NAMESPACE --type='json' --patch-file=$patch_file
+    do
+        verbose "Patch failed - retrying"
+        sleep 1
+        retry=$((retry - 1))
+        if [[ $retry == 0 ]] ; then
+            error_exit "Cannot kubectl patch cas $NAME --namespace $NAMESPACE --type='json' --patch-file=$patch_file
+. Bailing."
+        fi
+    done
+
+    export cas_manifest="$TARGET_DIR/owner-config/cas-${NAMESPACE}-${NAME}-${VERSION}-manifest.yaml"
+    verbose "Creating manifest '$cas_manifest' for setting up CAS"
+    kubectl get cas $NAME -n $NAMESPACE -o yaml > $cas_manifest
+
+    if [[ $do_wait_for_healthy == 1 ]]; then
+        wait_for_resource_phase "cas" "$NAME" "$NAMESPACE" "HEALTHY"
+    fi
+
+    verbose "The manifest of CAS '$NAME' in namespace '$NAMESPACE' is stored in $cas_manifest"
+    verbose "  - You can modify the metadata and spec fields of the manifest and apply the changes with 'kubectl apply -f \"$cas_manifest\""
+    verbose "The owner identity of CAS '$NAME' in namespace '$NAMESPACE' is stored in directory \"$TARGET_DIR/identity\""
+
+    verbose "Done. Shutting down tunnel"
+    kill $SERVICE_PID
+}
+
+function replace_needle_by_str() {
+    in_string=$1
+    needle=$2
+    repl_string=$3
+    echo ${in_string//$needle/$repl_string}
+}
+
+function make_string_ok_for_filename() {
+    in_string=$1
+    replace_needle_by_str $in_string "/" "_"
+}
+
+function extract_owner_identity_content() {
+    local source_file="$1"
+
+    if [[ ! -f "$source_file" ]]; then
+        error_exit "Internal error: source_file '$source_file' does not exist in extract_owner_identity_content"
+    fi
+    local identity=$(cat $source_file | jq '.identity')
+    if [[ "$identity" == null || "$identity" == "" ]]; then
+        error_exit "Could not extract identity from $source_file in extract_owner_identity_content"
+    fi
+    local seed=$(cat $source_file | jq '.session_signing_keypair_ed25519_seed')
+    if [[ "$seed" == null || "$seed" == "" ]]; then
+        warning "Could not extract session_signing_keypair_ed25519_seed from $source_file in extract_owner_identity_content"
+        cat <<-END
+{
+    "identity": $identity,
+    "cas_db": {}
+}
+END
+    else
+        cat <<-END
+{
+    "identity": $identity,
+    "cas_db": {},
+    "session_signing_keypair_ed25519_seed": $seed
+}
+END
+    fi
+}
+
+# HERE -
+function add_cas_db_info_to_owner_identity_file() {
+    local host_prefix="$1"
+    local identity_dir="$2"
+    local identity_rel_file_loc="$3"
+    local cas_name="$4"
+    local cas_namespace="$5"
+    local cas_client_port="$6"
+
+    if [[ "$host_prefix" == "" ]]; then
+        error_exit "Internal error: host_prefix empty in add_cas_db_info_to_owner_identity_file"
+    fi
+    if [[ "$identity_dir" == "" ]]; then
+        error_exit "Internal error: identity_dir empty in add_cas_db_info_to_owner_identity_file"
+    fi
+    if [[ "$identity_rel_file_loc" == "" ]]; then
+        error_exit "Internal error: identity_rel_file_loc empty in add_cas_db_info_to_owner_identity_file"
+    fi
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name empty in add_cas_db_info_to_owner_identity_file"
+    fi
+    if [[ "$cas_namespace" == "" ]]; then
+        error_exit "Internal error: cas_namespace empty in add_cas_db_info_to_owner_identity_file"
+    fi
+    if [[ "$cas_client_port" == "" ]]; then
+        error_exit "Internal error: cas_client_port empty in add_cas_db_info_to_owner_identity_file"
+    fi
+
+    local host_file_loc="$host_prefix/$identity_dir/$identity_rel_file_loc"
+
+    touch "${host_file_loc}" || error_exit "It seems you are not the owner of file '${host_file_loc}' - please change owner of this file"
+
+    local success=1
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    docker run --rm --platform linux/amd64 \
+        --add-host=host.docker.internal:host-gateway --network host \
+        --user $(id -u):$(id -g) \
+        -v "$TARGET_MOUNT_DIR"/$identity_dir:/$identity_dir \
+        -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
+        -e SCONE_CLI_CONFIG="/$identity_dir/$identity_rel_file_loc" \
+        -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+        -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+        -e SCONE_NO_TIME_THREAD=1 \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="sim" \
+        ${SCONECLI_IMAGE} \
+        sh -c "set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$cas_client_port || { echo ERROR: Attestation of CAS $cas_name in namespace $cas_namespace failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal:$cas_client_port" >& /dev/null || success=0
+
+    chmod og-rwx "$host_file_loc"
+
+    if [[ "$success" == 0 ]]; then
+        touch "${TARGET_MOUNT_DIR}/identity/config.json" || error_exit "It seems you are not the owner of file '${TARGET_MOUNT_DIR}/identity/config.json' - please change owner of this file"
+
+        docker run --rm --platform linux/amd64 \
+            --add-host=host.docker.internal:host-gateway --network host \
+            --user $(id -u):$(id -g) \
+            -v "$TARGET_MOUNT_DIR"/$identity_dir:/$identity_dir \
+            -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
+            -e SCONE_CLI_CONFIG="/$identity_dir/$identity_rel_file_loc" \
+            -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+            -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+            -e SCONE_NO_TIME_THREAD=1 \
+            -e SCONE_PRODUCTION=0 \
+            -e SCONE_MODE="sim" \
+            ${SCONECLI_IMAGE} \
+            sh -c "set -e ; scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$cas_client_port || { echo ERROR: Attestation of CAS $cas_name in namespace $cas_namespace failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal:$cas_client_port" >& /dev/null
+
+        chmod og-rwx "$host_file_loc"
+    fi
+
+    attest_result=$(cat $host_file_loc | jq ".cas_db.\"host.docker.internal:$cas_client_port\"")
+    if [[ "$attest_result" == null ]]; then
+        echo "failed to add attestation for host.docker.internal:$cas_client_port"
+        return 1
+    fi
+    local configured_cas_client_port=$(kubectl get cas $cas_name -n $cas_namespace -o jsonpath='{.spec.service.clientPort}')
+    local file_content=$(sed "s/host.docker.internal:$cas_client_port/$cas_name.$cas_namespace:$configured_cas_client_port/" "$host_file_loc")
+    echo "$file_content" >  "$host_file_loc"
+}
+
+# HERE -
+function get_owner_identity_for_policy_upload() {
+    local upload_identity_rel_file_loc="owner_id_${SVCNAME}_$NAMESPACE.json"
+    local upload_owner_identity_file_loc="$TARGET_DIR/identity/$upload_identity_rel_file_loc"
+    local source_owner_identity_file_loc="$1"
+
+    if [[ "$source_owner_identity_file_loc" == "" ]]; then
+        error_exit "Internal Error: source_owner_identity_file_loc is empty in get_owner_identity_for_policy_upload"
+    fi
+    extract_owner_identity_content "$source_owner_identity_file_loc" > "$upload_owner_identity_file_loc"
+    if [[ ! -f "$base_owner_identity_file_loc" ]]; then
+        # We save it for next time. Just in case...
+        cp "$upload_owner_identity_file_loc" "$base_owner_identity_file_loc"
+    fi
+    add_cas_db_info_to_owner_identity_file "$TARGET_DIR" "identity" "$upload_identity_rel_file_loc" "$SVCNAME" "$NAMESPACE" "$LOCAL_CAS_CLIENT_PORT" || error_exit "Could not attest CAS $SVCNAME in namespace $NAMESPACE"
+    sed 's/^/          /' "$upload_owner_identity_file_loc"
+}
+
+function upload_post_provisioning_sessions() {
+    local owner_identity
+    verbose "Create owner-identity file for backup-controller policy"
+
+    local source_owner_identity_file_loc="$post_provisioning_owner_identity"
+    local default_owner_identity_file_loc="$TARGET_DIR/identity/config.json"
+    local base_owner_identity_file_loc="$TARGET_DIR/$BASE_OWNER_IDENTITY_FILE_REL_LOC"
+
+    if [[ "$source_owner_identity_file_loc" == "" ]]; then
+        if [[ -f "$default_owner_identity_file_loc" ]]; then
+            source_owner_identity_file_loc=$default_owner_identity_file_loc
+        elif [[ -f "$base_owner_identity_file_loc" ]]; then
+            source_owner_identity_file_loc=$base_owner_identity_file_loc
+        else
+            error_exit "Could not find the owner-identity file of the CAS $SVCNAME in namespace $NAMESPACE. You can specify the file using the $post_provisioning_owner_identity_flag flag, or create one at the default location ($default_owner_identity_file_loc) by attesting the CAS."
+        fi
+    fi
+    verbose "    - Using owner-identity file $source_owner_identity_file_loc"
+
+    owner_identity=$(get_owner_identity_for_policy_upload "$source_owner_identity_file_loc") || error_exit "Could not extract the owner-identity to be used when uploading the backup-controller session"
+
+    CAS_OWNER_POLICY="$TARGET_DIR/identity/cas-owner-session-$NAME-$NAMESPACE.yaml"
+    download_file "$CAS_OWNER_POLICY_URL" "$CAS_OWNER_POLICY"
+
+    fn_policy_name=$(make_string_ok_for_filename $POLICY_NAME)
+    BACKUP_POLICY_TEMPLATE="$TARGET_DIR/identity/backup-controller-session-$fn_policy_name.yaml.template"
+    BACKUP_POLICY="$TARGET_DIR/identity/backup-controller-session-$fn_policy_name.yaml"
+    set_platform_ids
+    download_file "$CAS_BACKUP_POLICY_URL" "$BACKUP_POLICY_TEMPLATE"
+
+    POLICY_NAME="$POLICY_NAME" SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" OWNER_IDENTITY="$owner_identity" envsubst '$POLICY_NAME,${POLICY_NAME},$SCONE_CLI_MRENCLAVE,${SCONE_CLI_MRENCLAVE},$OWNER_IDENTITY,${OWNER_IDENTITY}' < "$BACKUP_POLICY_TEMPLATE" > "$BACKUP_POLICY"
+
+    verbose "Creating Backup Policy $POLICY_NAME for CAS $NAME in namespace $NAMESPACE (see file $BACKUP_POLICY)"
+
+    PROVISIONED_POLICY="$TARGET_DIR/identity/provisioned.yaml"
+    cat > "$PROVISIONED_POLICY" <<EOF
+name: provisioned
+version: "0.3.10"
+predecessor:
+
+access_policy:
+  read:
+    - ANY
+  update:
+    - CREATOR
+  create_sessions:
+    - CREATOR
+EOF
+
+    touch "${TARGET_MOUNT_DIR}/identity/config.json" || error_exit "It seems you are not the owner of file '${TARGET_MOUNT_DIR}/identity/config.json' - please change owner of this file"
+
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    docker run --rm --platform linux/amd64 \
+        --add-host=host.docker.internal:host-gateway --network host \
+        --user $(id -u):$(id -g) \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
+        -e SCONE_CLI_CONFIG="/identity/config.json" \
+        -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
+        -e POLICY_NAME="$POLICY_NAME" \
+        -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+        -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+        -e SCONE_NO_TIME_THREAD=1 \
+        -e NAME="$NAME" \
+        -e SCONE_PRODUCTION=0 \
+        ${SCONECLI_IMAGE} \
+        sh -c "export SCONE_MODE=sim; set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; }  ; scone cas set-default host.docker.internal:$LOCAL_CAS_CLIENT_PORT ; scone session create /identity/cas-owner-session-$NAME-$NAMESPACE.yaml ; echo 'Exit:' $? ; scone session create /identity/backup-controller-session-$fn_policy_name.yaml ; echo 'Exit:' $? ; scone session create /identity/provisioned.yaml ; echo Exit: '$?' ; echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}' ; scone cas show-identification -c ; echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}' ; scone cas show-identification -s ; echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'; scone cas show-identification --session-encryption-key"
+
+    echo -e "${ORANGE}PUBLIC NONCE=$NONCE${NC}"
+    chmod og-rwx "${TARGET_MOUNT_DIR}/identity/config.json"
+}
+
+function wait_for_grep_in_cas_pod_log() {
+    local cas_name="$1"
+    local namespace="$2"
+    local needle="$3"
+    local grep_result=""
+    local retry=$K_PROVISION_MAX_RETRIES
+    local pod=$(get_cas_pod_name $cas_name $namespace)
+
+    until kubectl logs $pod --namespace "$namespace" -c cas | grep "$needle"  > /dev/stderr
+    do
+        sleep 5
+        verbose "Waiting for '$needle' in cas pod log"
+        retry=$((retry - 1))
+        if [[ $retry == 0 ]] ; then
+            error_exit "Cannot retrieve '$needle' from log of pod $pod of CAS $cas_name in namespace $namespace. Bailing."
+        fi
+    done
+
+    grep_result=$(kubectl logs "$pod" --namespace "$namespace" -c cas | grep "$needle" | awk ' { print $NF } ')
+    grep_result=$(echo "$grep_result" | tail -1 )
+    echo $grep_result
+}
+
+function get_cas_provisioning_token() {
+    local cas_name="$1"
+    local namespace="$2"
+    local cas_provisioning_token=$(wait_for_grep_in_cas_pod_log $cas_name $namespace "CAS provisioning token")
+
+    if [[ "$cas_provisioning_token" == "" ]] ; then
+        error_exit "Could not retrieve CAS_PROVISIONING_TOKEN from log of CAS $cas_name in namespace $namespace. Got ''. Bailing."
+    fi
+    echo $cas_provisioning_token
+}
+
+function get_cas_key_hash() {
+    local cas_name="$1"
+    local namespace="$2"
+    local cas_key_hash=$(wait_for_grep_in_cas_pod_log $cas_name $namespace "CAS key hash")
+
+    if [[ "$cas_key_hash" == "" ]] ; then
+        error_exit "Could not retrieve CAS_KEY_HASH from log of CAS $cas_name in namespace $namespace. Got ''. Bailing."
+    fi
+    echo $cas_key_hash
+}
+
+function get_scone_cas_addr() {
+    local cas_name="$1"
+    local namespace="$2"
+    local svc_name=`kubectl get svc --namespace "$namespace" --selector "app.kubernetes.io/instance=$cas_name,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+    local scone_cas_addr=$(kubectl get svc --namespace "$namespace" "$svc_name" --template "{{ .spec.clusterIP }}")
+
+    if [[ "$scone_cas_addr" == "" ]] ; then
+        error_exit "Failed to determine SCONE_CAS_ADDR of service $svc_name in namespace $namespace"
+    fi
+    echo $scone_cas_addr
+}
+
+function get_cas_pod_name() {
+    local cas_name="$1"
+    local namespace="$2"
+    
+    local pod=""
+
+    until [[ $pod != "" ]]; do
+        verbose "Waiting for pod of CAS $cas_name in namespace $namespace to start"
+        sleep 5
+        pod=`kubectl get pod --selector "app.kubernetes.io/instance=$cas_name,app.kubernetes.io/name=cas" -n "$namespace" | tail -1 | awk '{ print $1 }'` || echo "..."
+    done
+    echo $pod
+}
+
+function get_backup_controller_pod_name() {
+    local cas_name
+    local namespace
+    cas_name="$1"
+    namespace="$2"
+    backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=bc,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+    if [[ "$backup_controller_name" == "" ]]; then 
+        backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+    fi
+    
+    num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l | sed 's/^[[:space:]]*//g')
+    while [[ "$num_backup_controller_pods" != "1" ]]; do
+        sleep 1
+        backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=bc,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+        if [[ "$backup_controller_name" == "" ]]; then 
+            backup_controller_name=$(kubectl get pods -l app.kubernetes.io/name=backup-controller,app.kubernetes.io/instance=$cas_name -n $namespace -o name)
+        fi
+        num_backup_controller_pods=$(echo "$backup_controller_name" | wc -l | sed 's/^[[:space:]]*//g')
+    done
+    echo $backup_controller_name
+}
+
+function create_unprovisioned_cas() {
+    local cas_name="$1"
+    local namespace="$2"
+    local version="$3"
+    local target_dir="$4"
+    local manifest_url="$5"
+
+    # check args
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name was empty in create_cas_preprovision_only"
+    fi
+    if [[ "$namespace" == "" ]]; then
+        error_exit "Internal error: namespace was empty in create_cas_preprovision_only"
+    fi
+    if [[ "$version" == "" ]]; then
+        error_exit "Internal error: version was empty in create_cas_preprovision_only"
+    fi
+    if [[ "$target_dir" == "" ]]; then
+        error_exit "Internal error: target_dir was empty in create_cas_preprovision_only"
+    fi
+    if [[ "$manifest_url" == "" ]]; then
+        error_exit "Internal error: manifest_url was empty in create_cas_preprovision_only"
+    fi
+
+    # check flags
+    if [[ $do_preprovision == 0 ]]; then
+        error_exit "Internal error. Expected \$do_preprovision == 1 at this point. Was 0."
+    fi
+    if [[ "$SVC" != "cas" ]]; then
+        error_exit "The flag $no_provisioning is only allowed for SVC cas."
+    fi
+    if [[ $do_postprovision == 1 ]] ; then
+        error_exit "The flag $post_provisioning_flag is not allowed together with the $no_provisioning flag."
+    fi
+    if [[ $do_recovery == 1 && $do_preprovision == 1 ]] ; then
+        error_exit "The flag $cas_recovery is not allowed together with the $no_provisioning flag."
+    fi
+
+    # Check prerequisites
+    verbose "Checking if CAS '$cas_name' in namespace '$namespace' already exists"
+    local exists=1
+    kubectl get cas "$cas_name" --namespace "$namespace" > /dev/null 2>/dev/null || exists=0
+    if [[ $exists == 1 ]] ; then
+        error_exit "Cas $cas_name exists in namespace $namespace. Cannot perform preprovisioning only."
+    fi
+    if kubectl get pvc "database-$cas_name-0"  --namespace "$namespace" 2> /dev/null 1> /dev/null ; then
+        error_exit "pvc database-$cas_name-0 already exists in namespace $namespace - provision of CAS for existing volume not supported: We do not want to overwrite existing database"
+    fi
+
+    verbose "Determine cas image to use"
+    local cas_image="$CAS_IMAGE"
+    if [[ "$image_overwrite" != "" ]]; then
+        warning "Using a non-standard CAS image $image_overwrite instead of $cas_image"
+        cas_image="$image_overwrite"
+    fi
+
+    local manifest_file="$target_dir/owner-config/cas-$namespace-$cas_name-$version-provisioning-step.yaml"
+
+    verbose "Creating the manifest ($manifest_file) from which the CAS will be created"
+    local template_file="${manifest_file}.template"
+    download_file "$manifest_url" "$template_file"
+
+    NAME=$cas_name NAMESPACE=$namespace IMAGE=$cas_image envsubst '$NAME,${NAME},$NAMESPACE,${NAMESPACE},$IMAGE,${IMAGE}' < "$template_file" > "$manifest_file"
+
+    verbose "Creating CAS $cas_name in namespace $namespace from image $cas_image: kubectl apply -f $manifest_file"
+    kubectl apply -f "$manifest_file" 2> /dev/null 1> /dev/null || error_exit "Creation of CAS from manifest '$manifest_file' failed."
+
+    verbose "Retrieving CAS_KEY_HASH AND CAS_PROVISIONING_TOKEN from log of CAS '$cas_name' in namespace '$namespace'"
+
+    local cas_key_hash=$(get_cas_key_hash $cas_name $namespace)
+    local cas_provisioning_token=$(get_cas_provisioning_token $cas_name $namespace)
+
+    verbose "CAS '$cas_name' in namespace '$namespace' is ready. Exiting."
+    echo "export CAS_KEY_HASH=$cas_key_hash"
+    echo "export CAS_PROVISIONING_TOKEN=$cas_provisioning_token"
+    exit 0
+}
+
+function provision_unprovisioned_cas_wo_docker() {
+    local cas_name="$1"
+    local namespace="$2"
+    local scone_cas_addr="$3"
+
+    # check args
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name was empty in create_cas_preprovision_only"
+    fi
+    if [[ "$namespace" == "" ]]; then
+        error_exit "Internal error: namespace was empty in create_cas_preprovision_only"
+    fi
+
+    # check flags
+    if [[ $do_postprovision == 0 ]]; then
+        error_exit "Internal error. Expected \$do_postprovision == 1 at this point. Was 0."
+    fi
+    if [[ "$SVC" != "cas" ]]; then
+        error_exit "The flag $post_provisioning_flag is only allowed for SVC cas."
+    fi
+    if [[ $do_preprovision == 1 ]] ; then
+        error_exit "The flag $post_provisioning_flag is not allowed together with the $no_provisioning flag."
+    fi
+    if [[ $do_recovery == 1 && $do_postprovision == 1 ]] ; then
+        error_exit "The flag $cas_recovery is not allowed together with the $post_provisioning_flag flag."
+    fi
+
+    # Check prerequisites
+    verbose "Checking whether CAS '$cas_name' in namespace '$namespace' already exists"
+    local exists=1
+    kubectl get cas "$cas_name" --namespace "$namespace" > /dev/null 2>/dev/null || exists=0
+    if [[ $exists == 0 ]] ; then
+        error_exit "Cas $cas_name does not exist in namespace $namespace. Post-provisioning requires an existing CAS."
+    fi
+
+    cas_addr="$scone_cas_addr"
+    if [[ "$cas_addr" == "" ]]; then
+        cas_addr="$cas_name.$namespace"
+    fi
+    post_provisioning_wo_docker "$cas_name" "$namespace" "$cas_addr" "$LOCAL_CAS_CLIENT_PORT"
+    exit 0
+}
+
+function post_provisioning_wo_docker() {
+    local cas_name="$1"
+    local namespace="$2"
+    local cas_addr="$3"
+    local cas_client_port="$4"
+
+    local policy_name="cas-owner/primary-backup"
+    local scone_cli_mrenclave=$(SCONE_HASH=1 /opt/scone/bin/rust-cli | tr -d '\r')
+
+    post_provision_attest_wo_docker "$cas_addr:$cas_client_port"
+    upload_post_provisioning_sessions_wo_docker "$cas_name" "$namespace" "$TARGET_DIR" "$policy_name" "$cas_addr" "$cas_client_port" "$scone_cli_mrenclave"
+    enable_post_provisioning_features_wo_docker "$cas_name" "$namespace" "$TARGET_DIR" "$policy_name"
+}
+
+function post_provision_attest_wo_docker() {
+    local cas_addr="$1"
+
+    scone cas attest "$SGX_TOLERATIONS" "$cas_addr" || scone cas attest "$SGX_STD_TOLERATIONS" "$cas_addr" || error_exit "ERROR: Attestation of CAS at $cas_addr failed - exiting"
+    scone cas set-default "$cas_addr"
+}
+
+function add_cas_db_info_to_owner_identity_file_wo_docker() {
+    local host_prefix="$1"
+    local identity_dir="$2"
+    local identity_rel_file_loc="$3"
+    local cas_name="$4"
+    local cas_namespace="$5"
+    local cas_addr="$6"
+    local cas_client_port="$7"
+
+    if [[ "$host_prefix" == "" ]]; then
+        error_exit "Internal error: host_prefix empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$identity_dir" == "" ]]; then
+        error_exit "Internal error: identity_dir empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$identity_rel_file_loc" == "" ]]; then
+        error_exit "Internal error: identity_rel_file_loc empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$cas_namespace" == "" ]]; then
+        error_exit "Internal error: cas_namespace empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$cas_addr" == "" ]]; then
+        error_exit "Internal error: cas_addr empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+    if [[ "$cas_client_port" == "" ]]; then
+        error_exit "Internal error: cas_client_port empty in add_cas_db_info_to_owner_identity_file_wo_docker"
+    fi
+
+    local success=1
+    local host_file_loc="$host_prefix/$identity_dir/$identity_rel_file_loc"
+    SCONE_CLI_CONFIG="$host_file_loc" scone cas attest $SGX_TOLERATIONS $cas_addr:$cas_client_port >& /dev/null  || success=0
+    SCONE_CLI_CONFIG="$host_file_loc" scone cas set-default $cas_addr:$cas_client_port >& /dev/null || success=0
+
+    if [[ "$success" == 0 ]]; then
+        SCONE_CLI_CONFIG="$host_file_loc" scone cas attest $SGX_STD_TOLERATIONS $cas_addr:$cas_client_port >& /dev/null  || { echo ERROR: Attestation of CAS $cas_name in namespace $cas_namespace failed - exiting ; exit 1; }
+        SCONE_CLI_CONFIG="$host_file_loc" scone cas set-default $cas_addr:$cas_client_port >& /dev/null
+    fi
+
+    attest_result=$(cat $host_file_loc | jq ".cas_db.\"$cas_addr:$cas_client_port\"")
+    if [[ "$attest_result" == null ]]; then
+        echo "failed to add attestation for $cas_addr:$cas_client_port"
+        return 1
+    fi
+    local configured_cas_client_port=$(kubectl get cas $cas_name -n $cas_namespace -o jsonpath='{.spec.service.clientPort}')
+    local file_content=$(sed "s/$cas_addr:$cas_client_port/$cas_name.$cas_namespace:$configured_cas_client_port/" "$host_file_loc")
+    echo "$file_content" >  "$host_file_loc"
+}
+
+function get_owner_identity_for_policy_upload_wo_docker() {
+    local source_owner_identity_file_loc="$1"
+    local cas_name="$2"
+    local cas_namespace="$3"
+    local cas_addr="$4"
+    local cas_client_port="$5"
+    if [[ "$source_owner_identity_file_loc" == "" ]]; then
+        error_exit "Internal Error: source_owner_identity_file_loc is empty in get_owner_identity_for_policy_upload_wo_docker"
+    fi
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal Error: cas_name is empty in get_owner_identity_for_policy_upload_wo_docker"
+    fi
+    if [[ "$cas_namespace" == "" ]]; then
+        error_exit "Internal Error: cas_namespace is empty in get_owner_identity_for_policy_upload_wo_docker"
+    fi
+    if [[ "$cas_addr" == "" ]]; then
+        error_exit "Internal Error: cas_addr is empty in get_owner_identity_for_policy_upload_wo_docker"
+    fi
+    if [[ "$cas_client_port" == "" ]]; then
+        error_exit "Internal Error: cas_client_port is empty in get_owner_identity_for_policy_upload_wo_docker"
+    fi
+    local upload_identity_rel_file_loc="owner_id_${cas_name}_${cas_name}.json"
+    local upload_owner_identity_file_loc="$TARGET_DIR/identity/$upload_identity_rel_file_loc"
+
+    extract_owner_identity_content "$source_owner_identity_file_loc" > "$upload_owner_identity_file_loc"
+    chmod og-rwx "$upload_owner_identity_file_loc"
+    if [[ ! -f "$base_owner_identity_file_loc" ]]; then
+        # We save it for next time. Just in case...
+        cp "$upload_owner_identity_file_loc" "$base_owner_identity_file_loc"
+    fi
+    add_cas_db_info_to_owner_identity_file_wo_docker "$TARGET_DIR" "identity" "$upload_identity_rel_file_loc" "$cas_name" "$cas_namespace" "$cas_addr" "$cas_client_port" || error_exit "Could not attest CAS $cas_name in namespace $cas_namespace"
+    sed 's/^/          /' "$upload_owner_identity_file_loc"
+}
+
+
+function upload_post_provisioning_sessions_wo_docker() {
+    local cas_name="$1"
+    local namespace="$2"
+    local target_dir="$3"
+    local policy_name="$4"
+    local cas_addr="$5"
+    local cas_client_port="$6"
+    local scone_cli_mrenclave="$7"
+
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$namespace" == "" ]]; then
+        error_exit "Internal error: namespace was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$target_dir" == "" ]]; then
+        error_exit "Internal error: target_dir was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$policy_name" == "" ]]; then
+        error_exit "Internal error: policy_name was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$cas_addr" == "" ]]; then
+        error_exit "Internal error: cas_addr was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$cas_client_port" == "" ]]; then
+        error_exit "Internal error: cas_client_port was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+    if [[ "$scone_cli_mrenclave" == "" ]]; then
+        error_exit "Internal error: scone_cli_mrenclave was empty in upload_post_provisioning_sessions_wo_docker"
+    fi
+
+    local owner_identity
+    verbose "Create owner-identity file for backup-controller policy"
+
+    local source_owner_identity_file_loc="$post_provisioning_owner_identity"
+    local default_owner_identity_file_loc="$TARGET_DIR/identity/config.json"
+    local base_owner_identity_file_loc="$TARGET_DIR/$BASE_OWNER_IDENTITY_FILE_REL_LOC"
+
+    if [[ "$source_owner_identity_file_loc" == "" ]]; then
+        if [[ -f "$default_owner_identity_file_loc" ]]; then
+            source_owner_identity_file_loc=$default_owner_identity_file_loc
+        elif [[ -f "$base_owner_identity_file_loc" ]]; then
+            source_owner_identity_file_loc=$base_owner_identity_file_loc
+        else
+            error_exit "Could not find the owner-identity file of the CAS $SVCNAME in namespace $NAMESPACE. You can specify the file using the $post_provisioning_owner_identity_flag flag, or create one at the default location ($default_owner_identity_file_loc) by attesting the CAS."
+        fi
+    fi
+    verbose "    - Using owner-identity file $source_owner_identity_file_loc"
+
+    owner_identity=$(get_owner_identity_for_policy_upload_wo_docker "$source_owner_identity_file_loc" "$cas_name" "$namespace" $cas_addr $cas_client_port) || error_exit "Could not extract the owner-identity to be used when uploading the backup-controller session"
+    cas_owner_policy_file="$target_dir/identity/cas-owner-session-$cas_name-$namespace.yaml"
+    download_file "$CAS_OWNER_POLICY_URL" "$cas_owner_policy_file"
+
+    fn_policy_name=$(make_string_ok_for_filename $policy_name)
+    backup_policy="$TARGET_DIR/identity/backup-controller-session-$fn_policy_name.yaml"
+    backup_policy_template="${backup_policy}.template"
+    set_platform_ids
+    download_file "$CAS_BACKUP_POLICY_URL" "$backup_policy_template"
+
+    POLICY_NAME="$policy_name" SCONE_CLI_MRENCLAVE="$scone_cli_mrenclave" OWNER_IDENTITY=$owner_identity envsubst '$POLICY_NAME,${POLICY_NAME},$SCONE_CLI_MRENCLAVE,${SCONE_CLI_MRENCLAVE},$OWNER_IDENTITY,${OWNER_IDENTITY}' < "$backup_policy_template" > "$backup_policy"
+
+    verbose "Creating Backup Policy $policy_name for CAS $cas_name in namespace $namespace (see file $backup_policy)"
+
+    provisioned_policy="$target_dir/identity/provisioned.yaml"
+    cat > "$provisioned_policy" <<EOF
+name: provisioned
+version: "0.3.10"
+predecessor:
+
+access_policy:
+  read:
+    - ANY
+  update:
+    - CREATOR
+  create_sessions:
+    - CREATOR
+EOF
+
+    set -e
+    export SCONE_MODE=auto
+    scone session create "$cas_owner_policy_file"
+    scone session create "$backup_policy"
+    scone session create "$provisioned_policy"
+    echo -en '\n${ORANGE}PUBLIC CAS_KEY=${NC}'
+    scone cas show-identification -c 
+    echo -en '${ORANGE}PUBLIC CAS_SOFTWARE_KEY=${NC}'
+    scone cas show-identification -s
+    echo -en '${ORANGE}PUBLIC CAS_SESSION_ENCRYPTION_KEY=${NC}'
+    scone cas show-identification --session-encryption-key
+}
+
+function enable_post_provisioning_features_wo_docker() {
+    # todo: next version - use encrypted policy and upload encrypted policy
+    local cas_name="$1"
+    local namespace="$2"
+    local target_dir="$3"
+    local policy_name="$4"
+
+    if [[ "$cas_name" == "" ]]; then
+        error_exit "Internal error: cas_name was empty in enable_post_provisioning_features_wo_docker"
+    fi
+    if [[ "$namespace" == "" ]]; then
+        error_exit "Internal error: namespace was empty in enable_post_provisioning_features_wo_docker"
+    fi
+    if [[ "$target_dir" == "" ]]; then
+        error_exit "Internal error: target_dir was empty in enable_post_provisioning_features_wo_docker"
+    fi
+    if [[ "$policy_name" == "" ]]; then
+        error_exit "Internal error: policy_name was empty in enable_post_provisioning_features_wo_docker"
+    fi
+
+    kubectl get cas $cas_name  --namespace "$namespace"
+
+    local patch_file="$target_dir/owner-config/cas-$namespace-$cas_name-$VERSION-patch.json"
+    local patch_template_file="${patch_file}.template"
+
+    local patch_file_url=""
+    if [[ $NO_BACKUP -eq 1 ]]; then
+        patch_file_url=$CAS_PATCH_PROBES_JSON_URL
+    else
+        patch_file_url=$CAS_PATCH_PROBES_AND_BACKUP_JSON_URL
+    fi
+
+    verbose "Patching CAS CR $cas_name in namespace $namespace (template patch file: $patch_file_url, final patch file: $patch_file)"
+    download_file $patch_file_url $patch_template_file
+    IMAGE_PREFIX="$IMAGE_PREFIX" IMAGE_REPO="$IMAGE_REPO" VERSION="$VERSION" POLICY_NAME="$policy_name" envsubst '${IMAGE_PREFIX},$IMAGE_PREFIX,${IMAGE_REPO},$IMAGE_REPO,${VERSION},$VERSION,${POLICY_NAME},$POLICY_NAME' < "$patch_template_file" > "$patch_file"
+
+    local retry=$K_PROVISION_MAX_RETRIES
+    until kubectl patch cas $cas_name --namespace $namespace --type='json' --patch-file=$patch_file
+    do
+        verbose "Patch failed - retrying"
+        sleep 1
+        retry=$((retry - 1))
+        if [[ $retry == 0 ]] ; then
+            error_exit "Cannot patch kubectl patch cas $cas_name --namespace $namespace --type='json' --patch-file=$patch_file. Bailing."
+        fi
+    done
+
+
+    if [[ $do_wait_for_healthy == 1 ]]; then
+        wait_for_resource_phase "cas" "$cas_name" "$namespace" "HEALTHY"
+    fi
+
+    export cas_manifest="$target_dir/owner-config/cas-${namespace}-${cas_name}-${VERSION}-manifest.yaml"
+    verbose "Creating manifest '$cas_manifest' for setting up CAS"
+    kubectl get cas $cas_name -n $namespace -o yaml > $cas_manifest
+
+    verbose "The manifest of CAS '$cas_name' in namespace '$namespace' is stored in $cas_manifest"
+    verbose "  - You can modify the metadata and spec fields of the manifest and apply the changes with 'kubectl apply -f \"$cas_manifest\""
+    verbose "The owner identity of CAS '$cas_name' in namespace '$namespace' is stored in directory \"$target_dir/identity\""
+
+    verbose "Done"
+    exit 0
+}
+
+SERVICE_PID=0
+help_flag="--help"
+nonce_flag="--nonce"
+ns_flag="--namespace"
+ns_short_flag="-n"
+dcap_flag="--dcap-api"
+dcap_short_flag="-d"
+verbose_short_flag="-v"
+verbose_flag="--verbose"
+owner_flag="--owner-config"
+owner_short_flag="-o"
+debug_flag="--debug"
+debug_short_flag="-d"
+debug=""
+target_flag="--target"
+file_short_flag="-f"
+file_flag="--filename"
+version_flag="--set-version"
+no_backup_flag="--no-backup"
+webhook_flag="--webhook"
+print_version_flag="--version"
+is_provisioned_flag="--is-provisioned"
+print_caskeys_flag="--print-public-keys"
+image_flag="--image-overwrite"
+verify_flag="--verify"
+manifests_url_flag="--manifests-dir"
+image_repo_flag="--image-registry"
+set_tolerations="--set-tolerations"
+set_toleration="--set-toleration"
+cas_recovery="--cas-database-recovery"
+local_backup="--local-backup"
+force_flag="--force"
+upgrade_flag="--upgrade"
+no_provisioning="--preprovision-only"
+post_provisioning_flag="--postprovision-only"
+post_provisioning_owner_identity_flag="--postprovision-owner-identity"
+no_image_signature_check_flag="--no-image-signature-check"
+no_docker_flag="--no-docker"
+scone_cas_addr_flag="--cas-address"
+cas_client_port_flag="--cas-client-port"
+local_cas_client_port_flag="--local-cas-client-port"
+
+unset SNAPSHOT
+verify_sign_key_flag="--verify-image-signatures"
+wait_for_healthy_flag="--wait"
+
+
+export SERVICE_PID_EXISTS="false"
+export SVC=""
+# NAME is the name of the cas
+export NAME=""
+NO_BACKUP=0
+export WEBHOOK=""
+is_provisioned=0
+print_caskeys=0
+image_overwrite=""
+issue_manifest=0
+use_force=0
+do_verify=0
+do_help=0
+do_recovery=0
+do_backup=0;
+do_cas_upgrade=0;
+export do_wait_for_healthy=0
+do_preprovision=0
+do_postprovision=0
+do_docker=1
+scone_cas_addr=""
+post_provisioning_owner_identity=""
+do_check_image_signatures=1
+
+export OWNER_FILE=""
+export DEFAULT_NAMESPACE="default"
+export NONCE=$(generate_random_hex_32)
+
+function set_defaults() {
+    if [[ "$NAMESPACE" == "" ]] ; then
+        export NAMESPACE="$DEFAULT_NAMESPACE" # Default Kubernetes namespace to use
+    else
+        warning "Using external NAMESPACE=$NAMESPACE"
+    fi
+
+    if [[ "$DCAP_KEY" == "" ]] ; then
+        # try to extract existing DCAP_KEY from the LAS
+        EXISTING_DCAP_KEY=$(kubectl get las las -o json | jq -r '.spec.dcapKey' )
+
+        if [[ "$EXISTING_DCAP_KEY" == "null" ]] ; then
+            warning "No DCAP API Key specified and extraction of dcapKey from LAS failed - using default DCAP_KEY=$DEFAULT_DCAP_KEY - not recommended."
+            export DCAP_KEY=$DEFAULT_DCAP_KEY  # Default DCAP API Key to used
+        else
+            DCAP_KEY="$EXISTING_DCAP_KEY"
+            warning "No DCAP API Key specified using dcapKey extracted from LAS - not recommended."
+        fi
+    else
+        warning "Using specified DCAP_KEY=$DCAP_KEY"
+    fi
+
+    if [[ "$IMAGE_PREFIX" != "" ]] ; then
+        warning "Using external IMAGE_PREFIX=$IMAGE_PREFIX"
+    fi
+
+    if [[ "$VERSION" == "" ]] ; then
+        export VERSION="$K_PROVISION_VERSION"
+    else
+        warning "Using external VERSION=$VERSION"
+    fi
+    if [[ $VERSION =~ ^"5." ]]; then
+        warning "DEPRECATION WARNING: All SCONE versions prior to 6.0.0 will be deprecated with the sunsetting of the DCAP v3 Intel PCS API on October 31th 2025 the latest! It is mandatory to upgrade CAS and LAS to 6.0.0 before October 31th 2025 to ensure continued operations."
+    fi
+
+
+    if [[ "$TARGET_DIR" == "" ]] ; then
+        export TARGET_DIR="$HOME/.cas" # Default target directory
+    else
+        warning "Using external TARGET_DIR=$TARGET_DIR"
+    fi
+
+    if [[ "$CONFIG_FILE" == "" ]] ; then
+        export CONFIG_FILE="operator_controller_config"
+    else
+        warning "Using external CONFIG_FILE=$CONFIG_FILE"
+    fi
+
+    # define toleration for  CAS that permis CAS DB Key injection (which is needed if CAS DB Key is derived from HSM)
+    if [[ "$SGX_TOLERATIONS" == "" ]] ; then
+        export SGX_TOLERATIONS="$K_SGX_TOLERATIONS --isvprodid $K_ISVPRODID --isvsvn $K_ISVSVN --mrsigner $K_MRSIGNER_DB"
+    else
+        warning "Using external SGX_TOLERATIONS=$SGX_TOLERATIONS"
+    fi
+
+    # define toleration for standard CAS, i.e., with standard CAS signer - this does not permit CAS DB Key injection
+    if [[ "$SGX_STD_TOLERATIONS" == "" ]] ; then
+        export SGX_STD_TOLERATIONS="$K_SGX_TOLERATIONS --isvprodid $K_ISVPRODID --isvsvn $K_ISVSVN --mrsigner $K_MRSIGNER_SCONTAIN"
+    else
+        warning "Using external SGX_STD_TOLERATIONS=$SGX_STD_TOLERATIONS"
+    fi
+
+    if [[ "$IMAGE_REPO" == "" ]] ; then
+        # At this point neither the env var image repo nor the cli flag was set, so we use the default
+        export IMAGE_REPO=$SCONTAIN_IMAGE_REPO
+    else
+        warning "Using external IMAGE_REPO=$IMAGE_REPO"
+    fi
+    if [[ "$MANIFESTS_URL" == "" ]] ; then
+        # At this point neither the env var manifests url nor the cli flag was set, so we use the default
+        MANIFESTS_URL="$DEFAULT_MANIFESTS_URL"
+    fi
+    if [[ "$CAS_PATCH_PROBES_AND_BACKUP_JSON_URL" == "" ]] ; then
+        export CAS_PATCH_PROBES_AND_BACKUP_JSON_URL="$MANIFESTS_URL/$VERSION/cas_patch_probes_and_backup.json"
+    fi
+    if [[ "$CAS_PATCH_PROBES_JSON_URL" == "" ]] ; then
+        export CAS_PATCH_PROBES_JSON_URL="$MANIFESTS_URL/$VERSION/cas_patch_probes.json"
+    fi
+    if [[ "$CAS_PROVISIONING_URL" == "" ]] ; then
+        export CAS_PROVISIONING_URL="$MANIFESTS_URL/$VERSION/cas_provisioning.yaml"
+    fi
+    if [[ "$CAS_OWNER_POLICY_URL" == "" ]] ; then
+        export CAS_OWNER_POLICY_URL="$MANIFESTS_URL/$VERSION/cas-owner.yaml"
+    fi
+    if [[ "$CAS_BACKUP_POLICY_URL" == "" ]] ; then
+        export CAS_BACKUP_POLICY_URL="$MANIFESTS_URL/$VERSION/backup_policy.yaml"
+    fi
+
+    if  [[ "$TARGET_MOUNT_DIR" == "" ]] ; then
+        TARGET_MOUNT_DIR="$TARGET_DIR"
+    else
+        warning "Using external TARGET_MOUNT_DIR=\"$TARGET_MOUNT_DIR\""
+    fi
+}
+
+# check_tolerations goes over all taints and tolerations, checking if all taints are tolerated
+# by the given tolerations. The operator is also respected according to the following rules:
+#   - A toleration "matches" a taint if the keys are the same and the effects are the same, and:
+#   - The operator is Exists (in which case no value should be specified), or
+#   - The operator is Equal and the values should be equal.
+check_tolerations() {
+    local taints_json="$1"
+    local tolerations_json="$2"
+
+    # we can not iterate over null, so we transform null values into iterables
+    if [[ "$taints_json" == "null" ]]; then
+        taints_json="[]"
+    fi
+    if [[ "$tolerations_json" == "null" ]]; then
+        tolerations_json="[]"
+    fi
+
+    jq -e --argjson taints "$taints_json" --argjson tolerations "$tolerations_json" '
+        all($taints[];
+        . as $taint |
+        any($tolerations[];
+            (.key == $taint.key) and
+            (
+            (.effect == null) or (.effect == $taint.effect)
+            ) and
+            (
+            (.operator == "Exists") or
+            (.operator == null and .value == $taint.value) or
+            (.operator == "Equal" and .value == $taint.value)
+            )
+        )
+        )
+    ' <<< '{}'
+}
+
+function get_schedulable_nodes_considering_tolerations {
+    local tolerations="$1"
+
+    local schedulable_nodes=$(kubectl get nodes --field-selector spec.unschedulable=false -o name)
+    local num_of_schedulable=0
+    for node in $schedulable_nodes; do
+        local node_taints=$(kubectl get $node -o json  | jq '.spec.taints')
+        # sgx capable nodes and tolerated by cas bc spec
+        if kubectl get --show-labels $node | grep -e "sgx.intel.com/capable=true" >> /dev/null \
+            && check_tolerations "$node_taints" "$tolerations" >> /dev/null; then
+            num_of_schedulable=$(( num_of_schedulable + 1 ))
+        fi
+    done
+
+    echo $num_of_schedulable
+}
+
+usage ()
+{
+    echo ""
+    echo "Usage:"
+    echo "  kubectl provision SVC [NAME] ... [$help_flag]"
+    echo ""
+    echo "Arguments:"
+    echo "  Service to provision: SVC = cas"
+    echo "    - cas:   provision CAS instance using the SCONE operator"
+    echo ""
+    echo "  Name of the service: NAME"
+    echo "    - If no name is specified, we set NAME=SVC"
+    echo ""
+    echo "  Find more information at: https://sconedocs.github.io/5_kubectl/"
+    echo ""
+    echo ""
+    echo "Options:"
+    echo "    $ns_short_flag | $ns_flag"
+    echo "                  The Kubernetes namespace in which the service should be deployed on the cluster."
+    echo "                  Default value: \"$DEFAULT_NAMESPACE\""
+    echo "    $dcap_flag | $dcap_short_flag <DCAP API Key> "
+    echo "                  Please provide DCAP API Key whenever provisioning CAS."
+    echo "                  When no DCAP_API key is provided, we try to extract and use the LAS DCAP API key."
+    echo "                  If LAS DCAP API key does not exist either, the default value \"$DEFAULT_DCAP_KEY\" is used."
+    echo "                  The default value will only work in a cloud with DCAP API Key caching service."
+    echo "                  Current value: $DCAP KEY=\"$DCAP_KEY\""
+    echo "    $nonce_flag <NONCE>"
+    echo "                  NONCE define a random hex string consisting of exactly 32 hex characters."
+    echo "                  If not defined, we generate a random 32 hex characters NONCE."
+    echo "    $owner_flag | $owner_short_flag <FILE>"
+    echo "                  Provide a specific owner config when provisioning the CAS instance."
+    echo "                  By default, we provision for a NodePort. We currently do not support"
+    echo "                  providing an owner config for LoadBalancer services."
+    echo "    $target_flag"
+    echo "                  Specify target directory for generated manifests and owner IDs. Default path=\"$TARGET_DIR\"."
+    echo "                  When running inside of a container and you want to mount the $TARGET_DIR"
+    echo "                  on an external directory, define environment variable TARGET_MOUNT_DIR."
+    echo "                  the TARGET_DIR is then stored on TARGET_MOUNT_DIR in the host filesystem."
+    echo "    $no_backup_flag"
+    echo "                  Create and provision a cas with the backup-controller disabled."
+    echo "    $verbose_short_flag | $verbose_flag"
+    echo "                  Enable verbose output"
+    echo "    $debug_flag | debug_short_flag"
+    echo "                  Enabled debug mode"
+    echo "    $webhook_flag <URL>"
+    echo "                  Forward entries of the CAS audit log to the given URL"
+    echo "    $manifests_url_flag <FILE/URL>"
+    echo "                  File or url of a directory that contains the default files to apply"
+    echo "                  Default: $MANIFESTS_URL"
+    echo "    $image_repo_flag <IMAGE REGISTRY URL>"
+    echo "                  Url of an image registry containing the images to be used"
+    echo "                  Default: $IMAGE_REPO"
+    echo "    $file_flag | $file_short_flag <FILE>"
+    echo "                  file or url that contains the manifest/policy/patch to apply"
+    echo "                  - default CAS patch applied to a provisioned CAS:"
+    echo "                     - $CAS_PATCH_PROBES_AND_BACKUP_JSON_URL, or"
+    echo "                     - $CAS_PATCH_PROBES_JSON_URL when $no_backup_flag is provided"
+    echo "    $is_provisioned_flag"
+    echo "                  Checks if CAS is already provisioned and exists: Exits with an error in case it was not yet provisioned."
+    echo "    $verify_flag"
+    echo "                  Verify the set up of the specified CAS instance."
+    echo "    $print_caskeys_flag"
+    echo "                  It prints the CAS Key, the CAS Software Key and the CAS encryption key."
+    echo "    $image_flag <IMAGE>"
+    echo "                  Replace the SVC image by the given image - mainly used for testing."
+    echo "                  The signature of this image will not be verified."
+    echo "    $version_flag <VERSION>"
+    echo "                  Set the version of CAS"
+    echo "    $local_backup"
+    echo "                  Take a snapshot of the encrypted CAS database and store in local filesystem."
+    echo "    $cas_recovery <SNAPSHOT>"
+    echo "                  Create a new CAS instance and start with existing CAS database in directory <SNAPSHOT>".
+    echo "    $set_tolerations \"<TOLERATIONS>\""
+    echo "                  Sets the tolerations, separated by spaces, that we permit when attesting SCONE CAS."
+    echo "                  Overwrites environment variable SGX_TOLERATIONS. Default is $K_SGX_TOLERATIONS"
+    echo "                  Example: \"--accept-group-out-of-date --accept-sw-hardening-needed --accept-configuration-needed\""
+    echo "                  See https://sconedocs.github.io/CAS_cli/#scone-cas-attest for more details."
+    echo "    $upgrade_flag \"<VERSION>\""
+    echo "                  Perform software upgrade of SVC. If SVC is cas, this will perform the following steps:"
+    echo "                  1. Update the policy of the backup controller (requires owner credentials)"
+    echo "                  2. Upgrade the backup controller by updating the CAS custom resource manifest."
+    echo "                  3. Upgrade the CAS service by updating the CAS image."
+    echo "                  Note: You need to set the version to the current version of CAS that you want to upgrade."
+    echo "                  Example: "
+    echo "                  DCAP_KEY="YOUR-API-KEY" kubectl provision cas my-cas --set-version 5.8.0 --no-image-signature-check --upgrade 5.8.1-rc.1"
+    echo "    $force_flag"
+    echo "                  Use force when:"
+    echo "                  - performing an upgrade of an unhealthy CAS"
+    echo "    $verify_sign_key_flag <PUBLIC-KEY PATH>"
+    echo "                  Path to the public key to use for verification of signed images."
+    echo "                  For the verification of signed images in the"
+    echo "                  $SCONTAIN_IMAGE_REPO repository, the public key does not need to be"
+    echo "                  provided, and this option is ignored."
+    echo "    $wait_for_healthy_flag"
+    echo "                  Wait for SVC to become healthy before returning."
+    echo "    $no_image_signature_check_flag"
+    echo "                  Disable checking the image signatures"
+    echo "    $no_docker_flag"
+    echo "                  Disable the use of docker. Requires running in on a computer with SCONE cli installed."
+    echo "    $scone_cas_addr_flag <SCONE_CAS_ADDR>"
+    echo "                  Use SCONE_CAS_ADDR as ip address or hostname to connect to the CAS, e.g., when attesting."
+    echo "                  Requires running on a computer with SCONE cli installed."
+    echo "                  Default value: NAME.NAMESPACE"
+    echo "    $cas_client_port_flag <CAS_CLIENT_PORT>"
+    echo "                  The port to use when connecting to the CAS client port, e.g., when attesting."
+    echo "                  This is the port defined in the CAS CR (.spec.service.clientPort)."
+    echo "                  Default value: the client port of the CAS or $DEFAULT_CAS_CLIENT_PORT for non-existing CASes"
+    echo "    $local_cas_client_port_flag <LOCAL_CAS_CLIENT_PORT>"
+    echo "                  The local port to bind when connecting to the client port of the CAS CR, e.g., when attesting the CAS."
+    echo "                  This is port is requested for use in loopback interface of this machine."
+    echo "                  Default value: the client port of the CAS or $DEFAULT_CAS_CLIENT_PORT for non-existing CASes"
+    echo "    $no_provisioning"
+    echo "                  It starts the CAS to a point at which one can inject a database key."
+    echo "    $post_provisioning_flag"
+    echo "                  Perform the post-provisioning steps on the CAS:"
+    echo "                  -  mark the cas as provisioned, and"
+    echo "                  -  enable startup probe, liveness probe, and backup-controller."
+    echo "                  NOTE: The use of this flag assumes the cas has already been provisioned (although"
+    echo "                  it has not yet been marked as provisioned)."
+    echo "    $post_provisioning_owner_identity_flag <OWNER-CONFIG>"
+    echo "                  Perform the post-provisioning steps on the CAS with the provided owner-identity file."
+    echo "                  Requires $post_provisioning_flag"
+    echo "    $help_flag"
+    echo "                  Output this usage information and exit."
+    echo "    $print_version_flag"
+    echo "                  Print version ($K_PROVISION_VERSION) and exit."
+    echo ""
+    echo "Current Configuration: "
+    echo "  - VERSION=\"$VERSION\""
+    echo "  - MANIFESTS_URL=\"$MANIFESTS_URL\""
+    echo "  - IMAGE_REPO=\"$IMAGE_REPO\""
+    echo "  - IMAGE_PREFIX=\"$IMAGE_PREFIX\""
+    echo "  - NAMESPACE=\"$NAMESPACE\""
+    echo "  - DCAP_KEY=\"$DCAP_KEY\""
+    echo "  - TARGET_DIR=\"$TARGET_DIR\""
+    echo "  - TARGET_MOUNT_DIR=\"$TARGET_MOUNT_DIR\""
+    echo "  - CAS_PATCH_PROBES_AND_BACKUP_JSON_URL=\"$CAS_PATCH_PROBES_AND_BACKUP_JSON_URL\""
+    echo "  - CAS_PATCH_PROBES_JSON_URL=\"$CAS_PATCH_PROBES_JSON_URL\""
+    echo "  - CAS_PROVISIONING_URL=\"$CAS_PROVISIONING_URL\""
+    echo "  - CAS_OWNER_POLICY_URL=\"$CAS_OWNER_POLICY_URL\""
+    echo "  - CAS_BACKUP_POLICY_URL=\"$CAS_BACKUP_POLICY_URL\""
+    echo "  - SGX_TOLERATIONS=\"$SGX_TOLERATIONS\""
+    echo "  - SGX_STD_TOLERATIONS=\"$SGX_STD_TOLERATIONS\""
+    echo "  - K_PROVISION_MAX_RETRIES=\"$K_PROVISION_MAX_RETRIES\""
+    echo "DEPRECATION WARNING: All SCONE versions prior to 6.0.0 will be deprecated with the sunsetting of the DCAP v3 Intel PCS API on October 31th 2025 the latest! It is mandatory to upgrade CAS and LAS to 6.0.0 before October 31th 2025 to ensure continued operations."
+}
+
+##### Parsing arguments
+args="$@"
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        ${ns_flag} | ${ns_short_flag})
+            export NAMESPACE=""
+            export DEFAULT_NAMESPACE="$2"
+            if [ ! -n "${DEFAULT_NAMESPACE}" ]; then
+                usage
+                error_exit "Error: The namespace '$DEFAULT_NAMESPACE' is invalid."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${webhook_flag})
+            WEBHOOK="$2"
+            if [ ! -n "${WEBHOOK}" ]; then
+                usage
+                error_exit "Error: Please specify a valid WEBHOOK ('$WEBHOOK' is invalid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${nonce_flag})
+            export NONCE="$2"
+            validate_hex_32 "$NONCE"  || {
+                usage
+                error_exit "Error: Please specify a valid NONCE ('$NONCE' is invalid)."
+            }
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${dcap_flag} | ${dcap_short_flag})
+            export DCAP_KEY="$2"
+            if [ ! -n "${DCAP_KEY}" ]; then
+                usage
+                error_exit "Error: Please specify a valid DCAP_KEY ('$DCAP_KEY' is invalid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        $manifests_url_flag)
+            export MANIFESTS_URL=$2
+            if [ ! -n "${MANIFESTS_URL}" ]; then
+                usage
+                error_exit "Error: Please specify a manifests directory when using $manifests_url_flag ('$MANIFESTS_URL' is invalid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        $image_repo_flag)
+            export IMAGE_REPO=$2
+            if [ ! -n "${IMAGE_REPO}" ]; then
+                usage
+                error_exit "Error: Please specify a valid docker image registry when using $image_repo_flag ('$IMAGE_REPO' is invalid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        $file_flag | $file_short_flag)
+            export POLICY="$2"
+            export CAS_PATCH_PROBES_AND_BACKUP_JSON_URL="$2"
+            export CAS_PATCH_PROBES_JSON_URL="$2"
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${owner_flag} | ${owner_short_flag})
+            OWNER_FILE="$2"
+            if [ ! -n "${OWNER_FILE}" ]; then
+                usage
+                error_exit "Error: Please specify a valid owner file ('$OWNER_FILE' is invalid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${target_flag})
+            TARGET_DIR="$2"
+            if [ ! -w "${TARGET_DIR}" ]; then
+                usage
+                error_exit "Error: Please specify a valid owner file ('$TARGET_DIR' is not writeable)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${cas_recovery})
+            do_recovery=1
+            export SNAPSHOT="$2"
+            if [ ! -d "${SNAPSHOT}" ]; then
+                usage
+                error_exit "Error: Please specify a valid SNAPSHOT directory ('$SNAPSHOT' is invalid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${verbose_flag}|${verbose_short_flag})
+            V=1
+            shift # past argument
+            ;;
+        ${no_backup_flag})
+            NO_BACKUP=1
+            shift # past argument
+            ;;
+        ${debug_flag} | ${debug_short_flag})
+            set -x
+            shift # past argument
+            ;;
+        ${version_flag})
+            export VERSION=""
+            export K_PROVISION_VERSION="$2"
+            if [ ! -n "${K_PROVISION_VERSION}" ]; then
+                usage
+                error_exit "Error: Please specify a valid VERSION ('$K_PROVISION_VERSION' is invalid)."
+            fi
+            if [[ $K_PROVISION_VERSION =~ ^"5." ]]; then
+                warning "DEPRECATION WARNING: All SCONE versions prior to 6.0.0 will be deprecated with the sunsetting of the DCAP v3 Intel PCS API on October 31th 2025 the latest! It is mandatory to upgrade CAS and LAS to 6.0.0 before October 31th 2025 to ensure continued operations."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${set_toleration} | ${set_tolerations})
+            export SGX_TOLERATIONS=""
+            export K_SGX_TOLERATIONS="$2"
+            if [ ! -n "${K_SGX_TOLERATIONS}" ]; then
+                usage
+                error_exit "Error: Please specify a valid SGX_TOLERATIONS ('$K_SGX_TOLERATIONS' is invalid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${print_version_flag})
+            echo $K_PROVISION_VERSION
+            exit 0
+            ;;
+        ${is_provisioned_flag})
+            is_provisioned=1
+            shift # past argument
+            ;;
+        ${verify_flag})
+            do_verify=1
+            shift # past argument
+            ;;
+        ${print_caskeys_flag})
+            print_caskeys=1
+            shift # past argument
+            ;;
+        ${wait_for_healthy_flag})
+            do_wait_for_healthy=1
+            shift # past argument
+            ;;
+        ${force_flag})
+            use_force=1
+            shift # past argument
+            ;;
+        ${image_flag})
+            image_overwrite="$2"
+            if [ ! -n "${image_overwrite}" ]; then
+                usage
+                error_exit "Error: Please specify a valid IMAGE ('$image_overwrite' is invalid)."
+            fi
+            warning "The signature of image $image_overwrite will not be verified."
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${upgrade_flag})
+            if [[ "${SVC}" == "cas" ]] ; then
+                cas_upgrade_version="$2"
+                do_cas_upgrade=1
+                if [ ! -n "${cas_upgrade_version}" ]; then
+                    usage
+                    error_exit "Error: Please specify a valid new VERSION for CAS when upgrading ('$cas_upgrade_version' is invalid)."
+                fi
+                ### Deprecate v5
+                if [[ $cas_upgrade_version =~ ^"5." ]]; then
+                    warning "DEPRECATION WARNING: All SCONE versions prior to 6.0.0 will be deprecated with the sunsetting of the DCAP v3 Intel PCS API on October 31th 2025 the latest! It is mandatory to upgrade CAS and LAS to 6.0.0 before October 31th 2025 to ensure continued operations."
+                fi
+            else
+                usage
+                error_exit "Error: Cannot upgrade service \"$SVC\". Expected 'cas'."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        ${verify_sign_key_flag})
+            export cosign_public_key_file="$2"
+            if [ ! -e "${cosign_public_key_file}" ]; then
+                usage
+                error_exit "Error: Please specify a valid public key file for image signature verfication ('$cosign_public_key_file' does not exist)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        $local_backup)
+            do_backup=1;
+            shift || true # past value
+            ;;
+        $no_image_signature_check_flag)
+            do_check_image_signatures=0;
+            shift || true # past value
+            ;;
+        $no_provisioning)
+            do_preprovision=1;
+            shift || true # past value
+            ;;
+        $post_provisioning_flag)
+            do_postprovision=1;
+            shift || true # past value
+            ;;
+        $no_docker_flag)
+            do_docker=0;
+            shift || true # past value
+            ;;
+        $scone_cas_addr_flag)
+            scone_cas_addr=$2;
+            if [[ "${scone_cas_addr}" == "" ]]; then
+                usage
+                error_exit "Error: Please specify a valid SCONE_CAS_ADDR ('$scone_cas_addr' is not valid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        $cas_client_port_flag)
+            CAS_CLIENT_PORT=$2;
+            if [[ "${CAS_CLIENT_PORT}" == "" ]]; then
+                usage
+                error_exit "Error: Please specify a valid CAS_CLIENT_PORT ('$CAS_CLIENT_PORT' is not valid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        $local_cas_client_port_flag)
+            LOCAL_CAS_CLIENT_PORT=$2;
+            if [[ "${LOCAL_CAS_CLIENT_PORT}" == "" ]]; then
+                usage
+                error_exit "Error: Please specify a valid LOCAL_CAS_CLIENT_PORT ('$LOCAL_CAS_CLIENT_PORT' is not valid)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        $post_provisioning_owner_identity_flag)
+            post_provisioning_owner_identity=$2;
+            if [ ! -e "${post_provisioning_owner_identity}" ]; then
+                usage
+                error_exit "Error: Please specify a valid owner-identity file ('$post_provisioning_owner_identity' does not exist)."
+            fi
+            shift # past argument
+            shift || true # past value
+            ;;
+        $help_flag)
+            do_help=1
+            shift
+            ;;
+        *)
+            if [[ $1 == -* ]] ; then
+                usage
+                warning "Arguments passed: $args"
+                error_exit "Error: Unknown argument passed: $1";
+            elif [[ "${SVC}" == "" ]]; then
+                SVC="$1"
+            elif [[ "${NAME}" == "" ]]; then
+                NAME="$1"
+                if [[ "${#NAME}" -gt 15  && "$SVC" == "cas" ]]; then
+                    usage
+                    warning "Arguments passed: $args"
+                    error_exit "Error: Name of the cas must not be longer than 15 characters"
+                fi
+            else
+                usage
+                warning "Arguments passed: $args"
+                error_exit "Error: Unknown parameter passed: $1";
+            fi
+            shift # past argument
+            ;;
+    esac
+done
+
+set_defaults
+
+if [ $do_help != 0 ] ; then
+    usage
+    exit 0
+fi
+
+
+
+if [[ "${SVC}" != "cas" ]]; then
+    usage
+    error_exit "Error: Please specify a valid SVC ('$SVC' is invalid)."
+fi
+
+if [[ $NO_BACKUP -eq 1 && $do_wait_for_healthy == 1 ]]; then
+    error_exit "We do not support the simultaneous use of $no_backup_flag and $wait_for_healthy_flag"
+fi
+
+if [[ "$NAME" == "" ]] ; then
+    verbose "No service NAME specified - using '$SVC' as NAME"
+    NAME="$SVC"
+fi
+
+if [[ $use_force == 1 && $do_cas_upgrade == 0 ]]; then
+    error_exit "We only support $force_flag together with $upgrade_flag and SVC cas."
+fi
+
+if [[ $do_postprovision == 0 && "$post_provisioning_owner_identity" != "" ]] ; then
+    error_exit "The $post_provisioning_owner_identity_flag flag requires the $post_provisioning_flag"
+fi
+
+if ! kubectl get namespace "$NAMESPACE" > /dev/null 2>/dev/null
+then
+    error_exit "Namespace '$NAMESPACE' cannot be retrieved. Either it does not exist or the cluster is not reachable."
+fi
+
+export SERVICE_PID_FILE="$TARGET_DIR/.forward-pid"
+
+# set all needed image env vars
+export SCONECLI_IMAGE="${IMAGE_REPO}/${IMAGE_PREFIX}sconecli:${VERSION}"
+export CAS_IMAGE="${IMAGE_REPO}/${IMAGE_PREFIX}cas:${VERSION}"
+export BACKUP_CONTROLLER_IMAGE="${IMAGE_REPO}/${IMAGE_PREFIX}backup-controller:${VERSION}"
+export CAS_RECOVERY_IMAGE="$IMAGE_REPO/${IMAGE_PREFIX}cas-recovery:$VERSION"
+if [[ $do_cas_upgrade == 1 ]]; then
+    export BACKUP_CONTROLLER_UPGRADE_IMAGE="${IMAGE_REPO}/${IMAGE_PREFIX}backup-controller:${cas_upgrade_version}"
+    export CAS_UPGRADE_IMAGE="${IMAGE_REPO}/${IMAGE_PREFIX}cas:${cas_upgrade_version}"
+    export CAS_SAFETY_SERVICE_UPGRADE_IMAGE="${IMAGE_REPO}/${IMAGE_PREFIX}cas-safety-service:${cas_upgrade_version}"
+fi
+
+verbose "Checking if CAS '$NAME' in namespace '$NAMESPACE' already exists"
+export IMAGE=""
+EXISTS=1  JSON=$(kubectl get cas "$NAME" --namespace "$NAMESPACE" -o json 2>/dev/null) || EXISTS=0
+
+if [[ "$CAS_CLIENT_PORT" == "" ]]; then
+    if [[ $EXISTS == 1 ]] ; then
+        CAS_CLIENT_PORT=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.spec.service.clientPort}')
+        verbose "Using the client port of the existing CAS. CAS_CLIENT_PORT: $CAS_CLIENT_PORT"
+    else
+        CAS_CLIENT_PORT=$DEFAULT_CAS_CLIENT_PORT
+        verbose "Using the default CAS client port. CAS_CLIENT_PORT: $CAS_CLIENT_PORT"
+    fi
+else
+    verbose "Using the user supplied CAS client port. CAS_CLIENT_PORT: $CAS_CLIENT_PORT"
+fi
+
+if [[ "$LOCAL_CAS_CLIENT_PORT" == "" ]]; then
+    LOCAL_CAS_CLIENT_PORT=$CAS_CLIENT_PORT
+    verbose "Using the the value of CAS_CLIENT_PORT as LOCAL_CAS_CLIENT_PORT. LOCAL_CAS_CLIENT_PORT: $LOCAL_CAS_CLIENT_PORT"
+else
+    verbose "Using the user supplied local CAS client port. LOCAL_CAS_CLIENT_PORT: $LOCAL_CAS_CLIENT_PORT"
+fi
+
+check_prerequisites
+if [[ $do_docker == 1 ]]; then
+    check_port_forward "$LOCAL_CAS_CLIENT_PORT"
+fi
+if [[ $do_check_image_signatures == 1 ]]; then
+    if [[ $do_docker == 0 ]]; then
+        error_exit "You have chosen the default behaviour of checking the signatures of the docker images used. This however requires docker which has been turned off ($no_docker_flag). Either remove the $no_docker_flag flag or use the $no_image_signature_check_flag flag additionally."
+    fi
+    check_image_signatures
+fi
+
+if [[ $do_backup == 1 ]] ; then
+    if ! check_if_provisioned > /dev/null; then
+        error_exit "CAS $NAME in namespace $NAMESPACE is not provisioned: refusing to backup an unprovisioned CAS"
+    fi
+
+    SNAP_DIR="cas-database-snapshots/$NAME-$NAMESPACE-last-snapshot-db"
+    POD="$NAME-0"
+    mkdir -p cas-database-snapshots
+    mv -f "$SNAP_DIR" "$SNAP_DIR.bak" 2> /dev/null || true
+    verbose "Creating backup of CAS $NAME in namespace $NAMESPACE in $SNAP_DIR"
+
+    kubectl cp $POD:/var/mnt/cas-database-snapshots/last-completed "$SNAP_DIR" -n $NAMESPACE --retries=20 || error_exit "Backup of latest snapshot of CAS $NAME in namespace $NAMESPACE in $SNAP_DIR failed."
+    verbose "Done"
+    exit 0
+fi
+
+if [ $is_provisioned == 1 ]
+then
+    check_if_provisioned
+    exit $? # Only executed when check_if_provisioned returns 0. rc 1 causes earlier exit due to set -e.
+fi
+
+if [ $print_caskeys == 1 ]
+then
+    print_cas_keys
+    exit 0
+fi
+
+if [ $do_cas_upgrade == 1 ]
+then
+    if [[ "$SVC" != "cas" ]] ; then
+        error_exit "Only CAS upgrade is supported: $SVC is not supported"
+    fi
+    if [[ "$VERSION" == "$cas_upgrade_version" ]] ; then
+        error_exit "CAS upgrade would not change the version: requested version is $cas_upgrade_version (existing is $VERSION)"
+    fi
+    if [[ "$VERSION" =~ ^"5.8" && "$cas_upgrade_version" =~ ^"5.8" ]]; then
+        error_exit "Cannot upgrade CAS from 5.8.x to another 5.8.x - upgrade of 5.8 patch version not supported"
+    fi
+
+    JSON=$(kubectl get cas "$NAME" --namespace "$NAMESPACE" -o json 2>/dev/null) || error_exit "Cannot find CAS $NAME in namespace $NAMESPACE. Exiting!"
+
+    # We can only safetly upgrade to new version when .spec.tolerations is equals to .spec.backup-controller.tolerations
+    # to ensure we can register the all nodes that CAS pod can move to. We sort by key to we can compare afterwords.
+    cas_tolerations=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r '.spec.tolerations')
+    cas_bc_tolerations=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r '.spec."backup-controller".tolerations')
+    if [[ "$cas_tolerations" != "null" ]]; then
+        cas_tolerations=$(echo $cas_tolerations | jq '.spec.tolerations | sort_by(.key)')
+    fi
+    if [[ "$cas_bc_tolerations" != "null" ]]; then
+        cas_bc_tolerations=$(echo $cas_bc_tolerations | jq '.spec."backup-controller".tolerations | sort_by(.key)')
+    fi
+    if [[ "$cas_tolerations" != "$cas_bc_tolerations" ]]; then
+        warning "CAS tolerations and its backup-controller tolerations differ (.spec.tolerations and .spec.backup-controller.tolerations)"
+        warning "Current .spec.tolerations:"
+        warning "$cas_tolerations"
+        warning "Current .spec.backup-controller.tolerations:"
+        warning "$cas_bc_tolerations"
+        error_exit "Unable to continue with upgrade! Set the same tolerations for both to be able to continue."
+    fi
+
+    export IMAGE=$(echo $JSON | jq '(.spec.image)' | tr -d '"' | jq -R '. | sub( "(?<image>[^':']*):(?<tag>.*)" ; "\(.image)")' | tr -d '"' )
+    TAG=$(echo $JSON | jq '(.spec.image)' | tr -d '"' | jq -R '. |   sub( "(?<image>[^':']*):(?<tag>.*)" ; "\(.tag)")' | tr -d '"' )
+    if [[ "$IMAGE" == "null" || "$IMAGE" == "" ]] ; then
+        error_exit "Cannot determine image name of CAS '$NAME' in namespace '$NAMESPACE'"
+    fi
+
+    verbose "Current CAS image '$IMAGE' has tag '$TAG'"
+    IMAGE="$IMAGE:$TAG"
+    if [[ "$VERSION" != "$TAG" ]] ; then
+        if [[ $use_force == 0 ]]; then
+            error_exit "Expected CAS of version $VERSION but found image of version $TAG. Please set the correct expected version. Exiting."
+        fi
+        warning "Performing forced upgrade of cas $NAME in namespace $NAMESPACE. Continuing although its image has the version $TAG instead of the expected $VERSION."
+    fi
+
+    if [[ "$image_overwrite" != "" ]] ; then
+        error_exit "We only support CAS upgrade for expected image versions. Exiting!"
+    fi
+
+    EXPECTED_IMAGE="$CAS_IMAGE"
+    NEXT_IMAGE="$CAS_UPGRADE_IMAGE"
+
+    if [[ "$IMAGE" != "$EXPECTED_IMAGE" ]] ; then
+        if [[ "$IMAGE" == "$CAS_RECOVERY_IMAGE" ]] ; then
+            warning "CAS runs recovery image: $CAS_RECOVERY_IMAGE"
+            export EXPECTED_IMAGE="$CAS_RECOVERY_IMAGE"
+        else
+            if [[ $use_force == 0 ]]; then
+                error_exit "Expected CAS Image '$EXPECTED_IMAGE' but retrieved  '$IMAGE'. We only support CAS upgrade for expected image versions - exiting! "
+            fi
+            warning "Performing forced upgrade of cas $NAME in namespace $NAMESPACE. Continuing although its current image is not the expected. Current: $IMAGE. Expected: $EXPECTED_IMAGE."
+        fi
+    fi
+
+    verbose "Checking if CAS is healthy"
+
+    STATE=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.state}')
+
+    if [[ "$STATE" != "HEALTHY" ]] ; then
+        if [[ $use_force == 0 ]]; then
+            error_exit "State of CAS '$NAME' in namespace '$NAMESPACE' is '$STATE': Expected HEALTHY state. Exiting!"
+        fi
+        warning "Performing forced upgrade of cas $NAME in namespace $NAMESPACE. Continuing although its state is $STATE as opposed to HEALTHY"
+    fi
+
+    export SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+    verbose "CAS $NAME has service name $SVCNAME"
+
+    if [[ "$SVCNAME" == "" ]] ; then
+      error_exit "Failed to determine the service name of CAS $NAME in namespace $NAMESPACE"
+    fi
+
+    verbose "Checking if CAS needs upgrading"
+
+
+    warning "Upgrading CAS version $VERSION to version $cas_upgrade_version"
+
+    # todo: use a local path for the policy name
+    backup_controller_session_spec=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.spec.backup-controller.session}')
+    if [[ "$backup_controller_session_spec" == "" ]] ; then
+        error_exit "Was not able to find the .spec.backup-controller.session for CAS $NAME in namespace $NAMESPACE. CAS upgrade requires to activate primary/backup first. Is primary/backup really activated for this CAS?"
+    fi
+
+    POLICY_NAME=$(echo "$backup_controller_session_spec" | sed 's/\/register$//')  # removing "/register" if present
+    POLICY_NAME=$(echo "$POLICY_NAME" | sed 's/\/upgrade$//')  # removing "/upgrade" if present
+
+    if [[ "$backup_controller_session_spec" == */register ]]; then
+        updated_backup_controller_session_spec="${backup_controller_session_spec%/register}/upgrade"
+        verbose 'Updating CAS .spec.backup-controller.session, switching from /register to /upgrade'
+        kubectl patch cas $NAME -n $NAMESPACE --type='json' --patch """
+        [
+            {
+                "op": "replace",
+                "path": "/spec/backup-controller/session",
+                "value": $updated_backup_controller_session_spec
+            },
+        ]""" || {
+            error_exit "Unable to update CAS .spec.backup-controller.session from $backup_controller_session_spec to $updated_backup_controller_session_spec"
+        }
+    fi
+
+    export OLD_SCONE_CLI_MRENCLAVE="$(docker run --platform linux/amd64 --pull always --rm --entrypoint scone -e SCONE_HASH=1 $BACKUP_CONTROLLER_IMAGE  cas | tr -d '\r')"
+
+    export SCONE_CLI_MRENCLAVE="$(docker run --platform linux/amd64 --pull always --rm --entrypoint scone -e SCONE_HASH=1 $BACKUP_CONTROLLER_UPGRADE_IMAGE  cas | tr -d '\r')"
+
+    verbose "Updating MrEnclave from  $OLD_SCONE_CLI_MRENCLAVE (verions $VERSION) to $SCONE_CLI_MRENCLAVE (version $cas_upgrade_version)"
+    if [[ "$OLD_SCONE_CLI_MRENCLAVE" == "" || "$SCONE_CLI_MRENCLAVE" == "" ]] ; then
+        error_exit "Failed to determine MRENCLAVE. Exiting."
+    fi
+
+    if [[ "$OLD_SCONE_CLI_MRENCLAVE" == "$SCONE_CLI_MRENCLAVE" ]] ; then
+        warning "MrEnclave of backup controller has not changed - no need to upgrade policy."
+    else
+        verbose "Upgrading Backup Policy $POLICY_NAME"
+
+        verbose "Enabling Port-Forwarding to $NAME in namespace $NAMESPACE"
+        check_port_forward "$LOCAL_CAS_CLIENT_PORT"
+        cas_svc_port_forward
+
+        verbose "Reading Session $POLICY_NAME from CAS $NAME in namespace $NAMESPACE"
+
+        touch "${TARGET_MOUNT_DIR}/identity/config.json" || error_exit "It seems you are not the owner of file '${TARGET_MOUNT_DIR}/identity/config.json' - please change owner of this file"
+
+        docker pull ${SCONECLI_IMAGE} >/dev/null
+        docker run --rm --platform linux/amd64  \
+            --add-host=host.docker.internal:host-gateway --network host \
+            --user $(id -u):$(id -g) \
+            -v "$TARGET_MOUNT_DIR"/identity:/identity \
+            -e SCONE_CLI_CONFIG="/identity/config.json" \
+            -e LOCAL_CAS_CLIENT_PORT="$LOCAL_CAS_CLIENT_PORT" \
+            -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+            -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+            -e SCONE_NO_TIME_THREAD=1 \
+            -e POLICY_NAME="$POLICY_NAME" \
+            -e OLD_SCONE_CLI_MRENCLAVE="$OLD_SCONE_CLI_MRENCLAVE" \
+            -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
+            -e SCONE_PRODUCTION=0 \
+            -e SCONE_MODE="sim" \
+            -e NAME="$NAME" \
+            ${SCONECLI_IMAGE} \
+            sh -c 'set -e ; scone cas attest $SGX_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT || scone cas attest $SGX_STD_TOLERATIONS host.docker.internal:$LOCAL_CAS_CLIENT_PORT || { echo ERROR: Attestation of CAS $NAME failed - exiting ; exit 1; } ; scone cas set-default host.docker.internal:$LOCAL_CAS_CLIENT_PORT  ;   scone session read $POLICY_NAME > /identity/session.tmp ;  HASH=`scone session verify /identity/session.tmp` ; echo HASH=$HASH ; sed -i "s/^predecessor: .*\$/predecessor: ${HASH}/g" /identity/session.tmp ; sed -i "s/${OLD_SCONE_CLI_MRENCLAVE}/${SCONE_CLI_MRENCLAVE}/g" /identity/session.tmp ; scone session update /identity/session.tmp'
+
+        chmod og-rwx "${TARGET_MOUNT_DIR}/identity/config.json"
+
+        if [[ $SERVICE_PID != 0 ]] ; then
+            verbose "Shutting down port-forwarding"
+            kill $SERVICE_PID
+        fi
+
+    fi
+
+    export cas_manifest_for_backup_update_new="$TARGET_DIR/owner-config/cas-${NAMESPACE}-${NAME}-${cas_upgrade_version}-manifest.json"
+    export cas_manifest_for_backup_update_old="$TARGET_DIR/owner-config/cas-${NAMESPACE}-${NAME}-${cas_upgrade_version}-input.json"
+
+    verbose "Upgrading CAS custom resource with new backup controller image: \"$BACKUP_CONTROLLER_UPGRADE_IMAGE\" - will save state in '$cas_manifest_for_backup_update_new'"
+
+    verbose "Getting current CAS custom resource manifest and writing it to '$cas_manifest_for_backup_update_old'"
+    old_backup_controller_name=$(get_backup_controller_pod_name "$NAME" "$NAMESPACE")
+    kubectl get cas $NAME -n $NAMESPACE -o json > "$cas_manifest_for_backup_update_old" || error_exit "failed to retrieve CAS manifest"
+
+    jq  ".spec.\"backup-controller\".image = \"$BACKUP_CONTROLLER_UPGRADE_IMAGE\"" "$cas_manifest_for_backup_update_old"  > "$cas_manifest_for_backup_update_new"
+    jq  "(.spec.\"backup-controller\".env[] | select(.name == \"BACKUP_CAS_IMAGE\").value) = \"$NEXT_IMAGE\"" "$cas_manifest_for_backup_update_new" > "$cas_manifest_for_backup_update_new.tmp"
+    mv "$cas_manifest_for_backup_update_new.tmp" "$cas_manifest_for_backup_update_new" || error_exit "failed to move $cas_manifest_for_backup_update_new.tmp into $cas_manifest_for_backup_update_new"
+
+    verbose "Updating CAS CR spec.backup-controller.image and .spec.backup-controller.env (for BACKUP_CAS_IMAGE env var) with the values from '$cas_manifest_for_backup_update_new' to update only the CAS backup controller image first!"
+
+    # We only update parts we need to avoid errors like
+    # "object has been modified"; please apply your changes to the latest version and try again"
+    # because of other fields that may have changed since last time we got the manifest state.
+    if [[ "$VERSION" =~ ^"5.8" ]]; then
+        verbose 'Also updating .spec.backup-controller.podSecurityContext.runAsNonRoot to true because the next version is nonroot image version.'
+        RUN_AS_NON_ROOT_PATCH_FOR_CAS_BC="""
+        {
+            "op": "replace",
+            "path": "/spec/backup-controller/podSecurityContext/runAsNonRoot",
+            "value": true,
+        },"""
+    fi
+    kubectl patch cas $NAME -n $NAMESPACE --type='json' --patch """
+        [
+            {
+                "op": "replace",
+                "path": "/spec/backup-controller/image",
+                "value": $(jq ".spec.\"backup-controller\".image" $cas_manifest_for_backup_update_new)
+            },
+            $RUN_AS_NON_ROOT_PATCH_FOR_CAS_BC
+            {
+                "op": "replace",
+                "path": "/spec/backup-controller/env",
+                "value": $(jq ".spec.\"backup-controller\".env" $cas_manifest_for_backup_update_new)
+            }
+        ]""" || error_exit "Failed to patch CAS CR. Check spec.backup-controller.image and .spec.backup-controller.env (for BACKUP_CAS_IMAGE env var) in '$cas_manifest_for_backup_update_new'"
+
+    verbose "Checking if we succeed..."
+
+    NEXT_IMAGE="$CAS_UPGRADE_IMAGE"
+    IMAGE="$CAS_IMAGE"
+
+    verbose "The new manifest of CAS $NAME in namespace $NAMESPACE is stored in $cas_manifest_for_backup_update_new"
+    verbose "  - You can modify the metadata and spec fields of the manifest and apply the changes with 'kubectl apply -f \"$cas_manifest_for_backup_update_new\""
+
+    new_backup_controller_name=$(get_backup_controller_pod_name "$NAME" "$NAMESPACE")
+    while [[ "$new_backup_controller_pods" == "$old_backup_controller_name" ]]; do
+        sleep 1
+        new_backup_controller_name=$(get_backup_controller_pod_name "$NAME" "$NAMESPACE")
+        verbose "Waiting for the backup controller pod to change name - bacause image changed, pod will be replaced"
+    done
+
+    CURRENT_CAS_PHASE_IN_UPGRADE=""
+    while [[ "$CURRENT_CAS_PHASE_IN_UPGRADE" != "EnablingMigration"  ]] ; do
+        sleep 1
+        CURRENT_CAS_PHASE_IN_UPGRADE=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.phase}')
+        verbose "Waiting for CAS get to EnablingMigration phase - current phase is $CURRENT_CAS_PHASE_IN_UPGRADE"
+    done
+    verbose "CAS reached EnablingMigration phase - as expected when changing backup controller image"
+
+    verbose "The name of the backup-controller pod has changed. Let's wait for the new one to have the expected number of registered backups."
+    verbose "Checking whether there are sgx-capable nodes with taints..."
+    
+    actual_migration=""
+    expected_migration="0/0"
+    while [[ "$actual_migration" != "$expected_migration" ]]; do
+        sleep 5
+        num_schedulable_and_capable_nodes=$(get_schedulable_nodes_considering_tolerations "$cas_tolerations")
+        expected_migration="$num_schedulable_and_capable_nodes/$num_schedulable_and_capable_nodes"
+        actual_migration=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.migrationNodeRatio}')
+        verbose "Waiting for all nodes, i.e., $expected_migration, to be registered for backup. Now: $actual_migration. This can take some minutes..."
+    done
+    verbose "All $expected_migration nodes are now registered for backup."
+
+    STATE=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.state}')
+    while [[ "$STATE" != "HEALTHY"  ]] ; do
+        sleep 1
+        STATE=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.state}')
+        verbose "Waiting for CAS to become HEALTHY again - current state is $STATE"
+    done
+
+    verbose "CAS is HEALTHY again, i.e., SCONE Operator was able to register all SGX nodes as backup controllers"
+
+    verbose "Sanity check that the images have changed as expected"
+    backup_cas_image=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq  ".spec.\"backup-controller\".env[] | select(.name == \"BACKUP_CAS_IMAGE\").value")
+    verbose "backup_cas_image in backup-controller.env[] (should be new version) $backup_cas_image"
+    backup_image=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq  ".spec.\"backup-controller\".image")
+    verbose "backup_image in backup-controller.image (should be new version) $backup_image"
+    cas_image=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq  ".spec.image")
+    verbose "cas_image  (should still be old version) $cas_image"
+
+    verbose "Updating CAS image in CAS custom resource manifest"
+
+    kubectl get cas $NAME -n $NAMESPACE -o json > "$cas_manifest_for_backup_update_old" || error_exit "failed to retrieve CAS manifest"
+
+    # It only makes sense to change also safety service if there was safety service set already. 5.8.x versions do not have it.
+    if jq -e '.spec.safetyService?.image?' "$cas_manifest_for_backup_update_old" > /dev/null; then
+        jq -e ".spec.image = \"$NEXT_IMAGE\" | .spec.safetyService.image = \"$CAS_SAFETY_SERVICE_UPGRADE_IMAGE\"" "$cas_manifest_for_backup_update_old" > "$cas_manifest_for_backup_update_new"
+        verbose "Updating CAS CR .spec.image and .spec.safetyService.image with values from '$cas_manifest_for_backup_update_new' to update only the CAS image in this phase!"
+        SAFETY_SERVICE_IMAGE_UPGRADE_PATCH_FOR_CAS="""
+        {
+            "op": "replace",
+            "path": "/spec/safetyService/image",
+            "value": "$CAS_SAFETY_SERVICE_UPGRADE_IMAGE",
+        },"""
+    else
+        jq -e ".spec.image = \"$NEXT_IMAGE\"" "$cas_manifest_for_backup_update_old" > "$cas_manifest_for_backup_update_new"
+        verbose "Updating CAS CR .spec.image with values from '$cas_manifest_for_backup_update_new' to update only the CAS image in this phase!"
+    fi
+
+    # We only update parts we need to avoid errors like
+    # "object has been modified"; please apply your changes to the latest version and try again"
+    # because of other fields that may have changed since last time we got the manifest state.
+    if [[ "$VERSION" =~ ^"5.8" ]]; then
+        # There are the following volumes from 5.8, but we hope we only need to fix /var/mnt/cas-database-snapshots and /etc/cas/db
+        # /etc/cas/cas.toml from config (rw,path="cas.toml")
+        # /etc/cas/db from database (rw)
+        # /tmp/healthcheck/ from healthcheck (rw) - this one is emptyDir volume
+        # /var/log/cas/audit from audit-log (rw)
+        # /var/mnt/cas-database-snapshots from database-snapshots (rw)
+        cas_5_8_volumes_to_fix="/etc/cas/db   /var/mnt/cas-database-snapshots   /var/log/cas/audit"
+        verbose "Fixing permission $NAME in volumes:"
+        verbose "  $cas_5_8_volumes_to_fix"
+
+        verbose 'Updating .spec.containerSecurityContextCAS'
+        kubectl patch cas $NAME -n $NAMESPACE --type='json' --patch """
+        [
+            {
+                "op": "replace",
+                "path": "/spec/containerSecurityContextCAS",
+                "value": {
+                    "allowPrivilegeEscalation": true,
+                    "capabilities": {
+                        "add": ["SYS_RAWIO"]
+                    }
+                },
+            }
+        ]"""
+        # The changes for these properties can be applied quickly.
+        verbose 'Now, waiting for .spec.containerSecurityContextCAS to be updated after reconciliation'
+        containerSecurityContextCASState="false"
+        declare -i sleep_counter=0
+        while [[ "$containerSecurityContextCASState" == "false"  ]] ; do
+            containerSecurityContextCASState=$(kubectl get pod -n $NAMESPACE $NAME-0 -o json | jq '.spec.containers[] | select(.name=="cas")|.securityContext.allowPrivilegeEscalation') || {
+                error_exit "  Unable to update security context of $NAME-0 container! We need to update it in order to adjust permissions for $NAME-0 volumes!"
+            }
+            echo "  Still waiting: .spec.containerSecurityContextCAS=$containerSecurityContextCASState"
+            if [[ $sleep_counter -eq 240 ]]; then
+                error_exit " $NAME-0 container did not change .spec.containerSecurityContextCAS in time!"
+            fi
+            sleep 2
+            sleep_counter=$(( sleep_counter+1 ))
+        done
+        verbose '  .spec.containerSecurityContextCAS updated'
+
+        verbose "  Waiting at most 10m for pod/$NAME-0 in namespace $NAMESPACE to be ready"
+        kubectl wait --for=condition=Ready -n $NAMESPACE pod/$NAME-0 --timeout=10m
+
+        kubectl exec -n $NAMESPACE "$NAME-0" -- addgroup -S -g 1000 nonroot || {
+            error_exit " Unable to execute addgroup -S -g 1000 nonroot in $NAME-0 container!"
+        }
+        verbose "  created nonroot user (uid 1000) in $NAME-0 container!"
+
+        for volume_dir in $cas_5_8_volumes_to_fix; do
+            kubectl exec -n $NAMESPACE  "$NAME-0" -- chown -R root:nonroot "$volume_dir" || {
+                error_exit " Unable to execute \"chown -R root:nonroot $volume_dir\" in $NAME-0 container!"
+            }
+            verbose "  executed \"chown -R root:nonroot $volume_dir\" in in $NAME-0 container successfully"
+            kubectl exec -n $NAMESPACE  "$NAME-0" -- chmod -R g+rw "$volume_dir" || {
+                error_exit " Unable to execute \"chmod -R g+rw $volume_dir\" in $NAME-0 container!"
+            }
+            verbose "  executed \"chmod -R g+rw $volume_dir\" in in $NAME-0 container successfully"
+        done
+        verbose "Done with permissions fixes!"
+
+        verbose "Getting security context of $NAME-0 back to default. Also updating .spec.podSecurityContext.runAsNonRoot to true and .spec.podSecurityContext.fsGroup to 1000 because next version is nonroot image version."
+        RUN_AS_NON_ROOT_AND_FSGROUP_PATCH_FOR_CAS="""
+        {
+            "op": "replace",
+            "path": "/spec/containerSecurityContextCAS",
+            "value": {
+                "allowPrivilegeEscalation": false,
+                "capabilities": {
+                    "add": ["SYS_RAWIO"],
+                    "drop": ["ALL"],
+                },
+            },
+        },
+        {
+            "op": "replace",
+            "path": "/spec/podSecurityContext/runAsNonRoot",
+            "value": true,
+        },
+        {
+            "op": "replace",
+            "path": "/spec/podSecurityContext/fsGroup",
+            "value": 1000,
+        },"""
+    fi
+    kubectl patch cas $NAME -n $NAMESPACE --type='json' --patch """
+        [
+            $RUN_AS_NON_ROOT_AND_FSGROUP_PATCH_FOR_CAS
+            $SAFETY_SERVICE_IMAGE_UPGRADE_PATCH_FOR_CAS
+            {
+                "op": "replace",
+                "path": "/spec/image",
+                "value": $(jq ".spec.image" $cas_manifest_for_backup_update_new)
+            }
+        ]"""  || error_exit "Failed to patch CAS CR. Check spec.image in '$cas_manifest_for_backup_update_new'"
+
+    if [[ "$VERSION" =~ ^"5.8" ]]; then
+        # Check if number of nodes is less than .spec.safetyService.desiredReplicas.
+        # In this case we disable safety service. If it is not disabled, CAS would never get healthy.
+        verbose "Checking safety service desired number of replicas"
+        safety_service_desired_replicas=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r '.spec.safetyService.desiredReplicas')
+        safety_service_tolerations=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r '.spec.safetyService.tolerations')
+        if [[ "$safety_service_tolerations" == "null" ]]; then
+            safety_service_tolerations="[]"
+        fi
+        disabled_safety_service_during_upgrade=0
+        num_of_safety_service_schedulable_nodes=$(get_schedulable_nodes_considering_tolerations "$safety_service_tolerations")
+        if [[ "$safety_service_desired_replicas" -gt "$num_of_safety_service_schedulable_nodes" ]]; then
+            warning "CAS safety service desired replicas number [$safety_service_desired_replicas] is greater than its schedulable nodes [$num_of_safety_service_schedulable_nodes]"
+            warning "Disabling safety service until we finish upgrade"
+            kubectl patch cas $NAME -n $NAMESPACE --type='json' -p '
+            [
+                { "op": "add", "path": "/spec/safetyService/enabled", "value": false},
+            ]'
+            disabled_safety_service_during_upgrade=1
+        fi
+    fi
+
+    new_cas_image_in_pod=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r ".spec.image")
+    verbose "Waiting for CAS to have spec.image=$NEXT_IMAGE spec applied in its pod - current is spec.image=$new_cas_image_in_pod"
+    max_attempts=90
+    while [[ "$new_cas_image_in_pod" != "$NEXT_IMAGE" ]]; do
+        if [[ $max_attempts -eq 0 ]]; then
+            error_exit "Failed: CAS spec.image=$NEXT_IMAGE spec was not applied in its pod in time!"
+        fi
+        sleep 10
+        new_cas_image_in_pod=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r ".spec.image")
+        verbose "Waiting for CAS to have spec.image=$NEXT_IMAGE spec applied in its pod - current is spec.image=$new_cas_image_in_pod"
+        max_attempts=$((max_attempts - 1))
+    done
+    unset new_cas_image_in_pod
+
+    new_cas_safety_service_image_in_pod=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r ".spec.safetyService.image")
+    verbose "Waiting for CAS to have spec.safetyService.image=$CAS_SAFETY_SERVICE_UPGRADE_IMAGE spec applied in CAS safety service pods - current is $new_cas_safety_service_image_in_pod"
+    max_attempts=90
+    while [[ "$new_cas_safety_service_image_in_pod" != "$CAS_SAFETY_SERVICE_UPGRADE_IMAGE" ]]; do
+        if [[ $max_attempts -eq 0 ]]; then
+            error_exit "Failed: CAS spec.safetyService.image=$CAS_SAFETY_SERVICE_UPGRADE_IMAGE spec was not applied in CAS safety service pods in time!"
+        fi
+        sleep 10
+        new_cas_safety_service_image_in_pod=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r ".spec.safetyService.image")
+        verbose "Waiting for CAS to have spec.safetyService.image=$CAS_SAFETY_SERVICE_UPGRADE_IMAGE spec applied in CAS safety service pods - current is $new_cas_safety_service_image_in_pod"
+        max_attempts=$((max_attempts - 1))
+    done
+    unset new_cas_safety_service_image_in_pod
+    unset max_attempts
+
+    verbose "Waiting CAS to be in HEALTHY state"
+    while [[ "$STATE" != "HEALTHY"  ]] ; do
+        sleep 1
+        STATE=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.state}')
+        verbose "Waiting for CAS to become HEALTHY again - current state is $STATE"
+    done
+
+    verbose "Sanity check that the images have changed as expected"
+    backup_cas_image=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq  ".spec.\"backup-controller\".env[] | select(.name == \"BACKUP_CAS_IMAGE\").value")
+    verbose "backup_cas_image in backup-controller.env[] (should be new version) $backup_cas_image"
+    backup_image=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq  ".spec.\"backup-controller\".image")
+    verbose "backup_image in backup-controller.image (should be new version) $backup_image"
+    cas_image=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq  ".spec.image")
+    verbose "cas_image        (should be new version) $cas_image"
+
+    if [[ "$VERSION" =~ ^"5.8" && $disabled_safety_service_during_upgrade -eq 1 ]]; then
+        warning "Safety service was disabled during upgrade"
+        warning "Enabling safety service again"
+        kubectl patch cas $NAME -n $NAMESPACE --type='json' -p '
+        [
+            { "op": "add", "path": "/spec/safetyService/enabled", "value": true},
+        ]'
+        warning "Done! CAS may not be in healthy state now because safety service has not enough schedulable nodes to be activated"
+        warning "Safety service desired replicas value is set to $safety_service_desired_replicas"
+        warning "Safety service can be currently scheduled to $num_of_safety_service_schedulable_nodes nodes"
+        warning "Disabling safety service or ensuring enough nodes, set in .spec.safetyService.desiredReplicas, will get CAS in healhty state"
+    fi
+    exit 0
+fi
+
+if [[ $do_verify == 1 ]] ; then
+    verbose "Verifying CAS $NAME in namespace $NAMESPACE"
+    is_prov="no"
+    check_if_provisioned > /dev/null && is_prov="yes"  || true
+    if [[ "$is_prov" == "no" ]]; then
+        error_exit "CAS '$NAME' in namespace '$NAMESPACE' is not provisioned."
+    fi
+    echo "CAS '$NAME' in namespace '$NAMESPACE' is attestable and provisioned."
+    exit 0
+fi
+
+if [[ $do_preprovision == 1 ]]; then
+     create_unprovisioned_cas "$NAME" "$NAMESPACE" "$VERSION" "$TARGET_DIR" "$CAS_PROVISIONING_URL"
+     exit 0
+fi
+
+if [[ $do_postprovision == 1 && $do_docker == 0 ]]; then
+     provision_unprovisioned_cas_wo_docker "$NAME" "$NAMESPACE" "$scone_cas_addr"
+     exit 0
+fi
+
+if [[ $EXISTS == 1 ]] ; then
+    if [[ $do_postprovision == 1 ]] ; then
+        verbose "We only perform the post-provisioning steps."
+        if [[ $do_docker == 0 ]]; then
+            error_exit "Internal error: This requires docker but docker is turned off. Instead use provision_unprovisioned_cas_wo_docker"
+        fi
+        post_provisioning
+        exit 0
+    fi
+
+    if [[ $do_recovery == 1 ]]; then
+        error_exit "The target CAS of a recovery must not exists. Please specify a different CAS name and namespace to use for the recovery."
+    fi
+
+    export IMAGE=$(echo $JSON | jq '(.spec.image)' | tr -d '"' | jq -R '. | sub( "(?<image>[^':']*):(?<tag>.*)" ; "\(.image)")' | tr -d '"' )
+    TAG=$(echo $JSON | jq '(.spec.image)' | tr -d '"' | jq -R '. |   sub( "(?<image>[^':']*):(?<tag>.*)" ; "\(.tag)")' | tr -d '"' )
+    if [[ "$IMAGE" == "null" || "$IMAGE" == "" ]] ; then
+        error_exit "Cannot determine image name of CAS '$NAME' in namespace '$NAMESPACE'"
+    fi
+
+    if [[ "$IMAGE" == "$TAG" ]] ; then
+        warning "CAS Image '$IMAGE' of CAS  $NAME in namespace $NAMESPACE has no tag specified!"
+        export IMAGE="$IMAGE:latest"
+    else
+        verbose "CAS Image '$IMAGE' has tag '$TAG'"
+        export IMAGE="$IMAGE:$TAG"
+    fi
+
+    if [[ "$image_overwrite" != "" ]]
+    then
+        warning "Using a non-standard CAS image $image_overwrite instead of $IMAGE"
+        export IMAGE="$image_overwrite"
+        EXPECTED_IMAGE="$image_overwrite"
+    else
+        EXPECTED_IMAGE="$CAS_IMAGE"
+    fi
+    if [[ "$IMAGE" != "$EXPECTED_IMAGE"  ]] ; then
+        if [[ "$IMAGE" == "$CAS_RECOVERY_IMAGE" ]] ; then
+            warning "CAS runs recovery image: $CAS_RECOVERY_IMAGE"
+            export EXPECTED_IMAGE="$CAS_RECOVERY_IMAGE"
+        else
+            error_exit "Expected CAS Image '$EXPECTED_IMAGE' or '$CAS_RECOVERY_IMAGE' but retrieved  '$IMAGE' - exiting! I cannot change the image. Consider to change the version with ${version_flag}. Alternatively, you can set the image with option ${image_flag}."
+        fi
+    fi
+else
+    if [[ $do_postprovision == 1 ]] ; then
+        error_exit "The $post_provisioning_flag flag requires the CAS to exist. No CAS $NAME found in namespace $NAMESPACE"
+    fi
+
+    IMAGE="$CAS_IMAGE"
+    if [[ $do_recovery == 1 ]] ; then
+        export IMAGE="$CAS_RECOVERY_IMAGE"
+        EXPECTED_IMAGE="$IMAGE"
+        verbose "- Recovering CAS using IMAGE $IMAGE"
+    fi
+    if [[ "$image_overwrite" != "" ]]
+    then
+        warning "Using a non-standard CAS image $image_overwrite instead of $IMAGE"
+        export IMAGE="$image_overwrite"
+    fi
+fi
+
+
+if [[ $EXISTS == 0 ]] ; then
+    if [[ $do_recovery == 1 ]] ; then
+        export SNAPSHOT="${SNAPSHOT:-last-snapshot-db}"
+        verbose "Recovering service 'cas': NAME = '$NAME' in namespace '$NAMESPACE' using snapshot $SNAPSHOT"
+        verbose "Checking permissions of snapshot files"
+        need_to_fix_snapshot_permissions=0
+
+        cas_db_owner_group="$(stat -c '%u:%g' $SNAPSHOT/cas.db)"
+        cas_db_perm="$(stat -c '%a' $SNAPSHOT/cas.db)"
+        if [[ "$cas_db_owner_group" == "1000:1000" ]]; then
+            verbose "$SNAPSHOT/cas.db owner and group are ok: $cas_db_owner_group"
+            case "$cas_db_perm" in
+                66[0-7]|67[0-7]|76[0-7]|77[0-7]) # check we have at least u+g rw
+                    verbose "$SNAPSHOT/cas.db owner and group permissions are ok: $cas_db_perm"
+                    ;;
+                *)
+                    warning "$SNAPSHOT/cas.db owner and group permissions are not ok: $cas_db_perm. We will try to fix this."
+                    need_to_fix_snapshot_permissions=1
+                    ;;
+            esac
+        else
+            warning "$SNAPSHOT/cas.db nonroot owner and group are not ok: $cas_db_owner_group. We will try to fix this."
+            need_to_fix_snapshot_permissions=1
+        fi
+
+        cas_keystore_owner_group="$(stat -c '%u:%g' $SNAPSHOT/cas.key-store)"
+        cas_keystore_perm="$(stat -c '%a' $SNAPSHOT/cas.key-store)"
+        if [[ "$cas_keystore_owner_group" == "1000:1000" ]]; then
+            verbose "$SNAPSHOT/cas.key-store owner and group are ok: $cas_keystore_owner_group"
+            case "$cas_keystore_perm" in
+                66[0-7]|67[0-7]|76[0-7]|77[0-7]) # check we have at least u+g rw
+                    verbose "$SNAPSHOT/cas.key-store owner and group permissions are ok: $cas_keystore_perm"
+                    ;;
+                *)
+                    warning "$SNAPSHOT/cas.key-store owner and group permissions are not ok: $cas_keystore_perm. We will try to fix this."
+                    need_to_fix_snapshot_permissions=1
+                    ;;
+            esac
+        else
+            warning "$SNAPSHOT/cas.key-store nonroot owner and group are not ok: $cas_keystore_owner_group. We will try to fix this."
+            need_to_fix_snapshot_permissions=1
+        fi
+
+        if [[ $need_to_fix_snapshot_permissions -eq 1 ]]; then
+            my_user=$(whoami)
+            if [[ "$my_user" == "root" ]]; then
+                verbose "Detected we are running as root user, so we can fix the permissions:"
+                chmod -R 660 $SNAPSHOT
+                chown -R 1000:1000 $SNAPSHOT
+                verbose "Done."
+            else
+                warning "Unable to continue with backup recovery"
+                warning "Fix the permissions of the snapshot files: $SNAPSHOT/cas.db and $SNAPSHOT/cas.key-store"
+                warning "Please ensure user and group [1000:1000], and read-write [ug+rw] permissions for user and group:"
+                warning "chmod -R 660 $SNAPSHOT/*"
+                warning "chown -R 1000:1000 $SNAPSHOT/*"
+                exit 1
+            fi
+        fi
+    fi
+
+    verbose "CAS $NAME in namespace $NAMESPACE does not exist - creating it"
+
+    export SVC_DNS_NAME="$NAME.$NAMESPACE.svc.cluster.local"
+    if kubectl get pvc "database-$NAME-0"  --namespace "$NAMESPACE" 2> /dev/null 1> /dev/null ; then
+        warning "Volume database-$NAME-0 already exists - provision of CAS for existing volume not supported: We do not want to overwrite existing database"
+        exit 1
+    fi
+
+    template_file="$TARGET_DIR/owner-config/cas-$NAMESPACE-$NAME-$VERSION-provisioning-step.yaml.template"
+    manifest="$TARGET_DIR/owner-config/cas-$NAMESPACE-$NAME-$VERSION-provisioning-step.yaml"
+
+    verbose "Creating manifest '$manifest' for CAS provisioning"
+    download_file "$CAS_PROVISIONING_URL" "$template_file"
+
+    SCONE="\$SCONE" envsubst < "$template_file" > "$manifest"
+    echo "  nonce: $NONCE" >> "$manifest"
+
+    verbose "Creating/Applying CAS CR for Provisioning"
+    kubectl apply -f "$manifest" 2> /dev/null 1> /dev/null || error_exit "Creation of CAS Manifest '$manifest' failed. Check that that $VERSION is supported by the SCONE operator. For imore information, execute the command 'kubectl apply -f $manifest' manually."
+else
+    verbose "CAS '$NAME' in namespace '$NAMESPACE' already exists - trying to provision it"
+fi
+
+POD=""
+until [[ $POD != "" ]]
+do
+    verbose "Waiting for CAS $NAME in namespace $NAMESPACE to start"
+    sleep 5
+    POD=`kubectl get pod --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" -n "$NAMESPACE" | tail -1 | awk '{ print $1 }'` || echo "..."
+done
+
+verbose "Found POD '$POD'"
+
+verbose "determining the CAS address"
+
+export SVCNAME=`kubectl get svc --namespace "$NAMESPACE" --selector "app.kubernetes.io/instance=$NAME,app.kubernetes.io/name=cas" | tail -1 | awk '{ print $1 }'`
+export SCONE_CAS_ADDR=$(kubectl get svc --namespace "$NAMESPACE" "$SVCNAME" --template "{{ .spec.clusterIP }}")
+
+verbose " CAS address = $SCONE_CAS_ADDR (SVC name = $SVCNAME)"
+
+if [[ "$SCONE_CAS_ADDR" == "" ]] ; then
+    error_exit "Failed to determine IP address of service $SVCNAME in namespace $NAMESPACE"
+fi
+
+is_prov="no"
+if [[ $EXISTS == 1 ]]; then
+    check_if_provisioned > /dev/null && is_prov="yes"  || true
+fi
+
+if [[ "$is_prov" == "no" ]]; then
+    verbose "Retrieving CAS_KEY_HASH AND CAS_PROVISIONING_TOKEN from log of pod '$POD' in namespace '$NAMESPACE'"
+
+    RETRY=$K_PROVISION_MAX_RETRIES
+    until kubectl logs $POD --namespace "$NAMESPACE" -c cas | grep "CAS key hash" > /dev/stderr
+    do
+        sleep 5
+        verbose "Waiting for CAS key"
+        RETRY=$((RETRY - 1))
+        if [[ $RETRY == 0 ]] ; then
+        error_exit "Cannot retrieve CAS_KEY_HASH from log of CAS $NAME. Bailing."
+        fi
+    done
+
+    CAS_KEY_HASH=$(kubectl logs "$POD"  --namespace "$NAMESPACE" -c cas | grep "CAS key hash" | awk '{ print $NF } ')
+    export CAS_KEY_HASH=$(echo "$CAS_KEY_HASH" | tail -1 )
+
+    RETRY=$K_PROVISION_MAX_RETRIES
+    until kubectl logs $POD --namespace "$NAMESPACE" -c cas | grep "CAS provisioning token"  > /dev/stderr
+    do
+        sleep 5
+        verbose "Waiting for CAS provisioning token: $POD in namespace $NAMESPACE"
+        RETRY=$((RETRY - 1))
+        if [[ $RETRY == 0 ]] ; then
+        error_exit "Cannot retrieve CAS_PROVISIONING_TOKEN from log of CAS $NAME. Bailing."
+        fi
+    done
+
+    export CAS_PROVISIONING_TOKEN=$(kubectl logs "$POD"  --namespace "$NAMESPACE" -c cas | grep "CAS provisioning token" | awk ' { print $NF } ')
+
+    if [[ "$CAS_PROVISIONING_TOKEN" == "" ]] ; then
+        if [[ $EXISTS == 0 ]] ; then
+            error_exit "Cannot determine the provisioning token of CAS '$NAME' in namespace '$NAMESPACE'. Bailing."
+        fi
+    fi
+    if [[ "$CAS_KEY_HASH" == "" ]] ; then
+        if [[ $EXISTS == 0 ]] ; then
+            error_exit "Cannot determine the CAS_KEY of CAS '$NAME' in namespace '$NAMESPACE'. Bailing."
+        fi
+    fi
+
+fi
+if [[ $do_preprovision == 1 ]] ; then 
+    verbose "CAS '$NAME' in namespace '$NAMESPACE' is ready. Exiting."
+    echo "export CAS_KEY_HASH=$CAS_KEY_HASH"
+    echo "export CAS_PROVISIONING_TOKEN=$CAS_PROVISIONING_TOKEN"
+    exit 0
+fi
+
+export POLICY_NAME="cas-owner/primary-backup"
+
+export SCONE_CLI_MRENCLAVE="$(docker run --platform linux/amd64 --pull always --rm --entrypoint scone -e SCONE_HASH=1 "$BACKUP_CONTROLLER_IMAGE" cas | tr -d '\r')"
+
+if [[ $do_recovery == 1 ]] ; then
+    export SNAPSHOT="${SNAPSHOT:-last-snapshot-db}"
+    verbose "Recovering service 'cas': NAME = '$NAME' in namespace '$NAMESPACE' using snapshot $SNAPSHOT"
+    export OWNER_IDENTITY=$(cat "$TARGET_DIR/identity/owner_id_${SVCNAME}_$NAMESPACE.json") 
+    verbose "Copying snapshot $SNAPSHOT to pod $POD"
+    kubectl cp "$SNAPSHOT/cas.db" "$POD:/etc/cas/db/last-snapshot-db" -n $NAMESPACE
+    kubectl cp "$SNAPSHOT/cas.key-store" "$POD:/etc/cas/db/last-snapshot-cas.key-store" -n $NAMESPACE
+    # We can restart a new CAS with the same image or we roll back the CAS started in step 0:
+    kubectl exec -n $NAMESPACE $POD -- bash restart-cas 1> .restart-cas.stdout && echo "Restart initiated."  || warning "Failed to restart the cas process (Exit code: $?). Assuming its process indeed was not restarted, this script will wait in vain for the CAS to turn HEALTHY on its own. In this case, you can restart the CAS process manually by executing 'kill -HUP \$CAS_PID' inside the CAS pod, where \$CAS_PID is the process ID of the CAS process. This way the CAS might turn HEALTHY, allowing the script to continue."
+    # todo: check if new CAS is up by checking the CAS_KEY and waiting until we can query the CAS keys
+    verbose "Waiting for CAS to be restarted... will take 60 seconds."
+    wait_for_resource_phase "cas" "$NAME" "$NAMESPACE" "HEALTHY"
+    HASH=$(session_hash "provisioned" "$NAME")
+    verbose "HASH is '$HASH'"
+    sleep 5
+    check_port_forward "$LOCAL_CAS_CLIENT_PORT"
+    cas_svc_port_forward
+elif [[ "$is_prov" == "yes" ]] ; then
+    echo "The CAS $NAME in namespace $NAMESPACE is already provisioned. Nothing more to do."
+    exit 0
+else
+    verbose "Provisioning service 'cas': NAME = '$NAME' in namespace '$NAMESPACE' using DCAP-API Key '$DCAP_KEY'"
+
+    if [[ "$DCAP_KEY" == "$DEFAULT_DCAP_KEY" ]] ; then
+        warning  "No DCAP API Key specified! Using default - this only recommended if you use a self-serving LAS (i.e., a cloud with a DCAP caching service!)"
+    fi
+
+    if [[ "$WEBHOOK" != "" ]] ; then
+        SINK="network"
+        WEBURL="url = \"$WEBHOOK\""
+    else
+        SINK="file"
+        WEBURL=""
+    fi
+
+    CONFIG_FILE="$TARGET_DIR/owner-config/config.toml"
+    if [[ "$OWNER_FILE" != "" ]] ; then
+        verbose "Downloading owner-config from $OWNER_FILE to $CONFIG_FILE";
+        download_file "$OWNER_FILE" "$CONFIG_FILE"
+    else 
+        cat > "$CONFIG_FILE" <<EOF
+enclave_reconnect_timeout = "24h"
+[api_identity]
+common_name = "$SVCNAME"
+alt_names = ["$POD",  "$POD.$NAMESPACE.svc.cluster.local", "$POD.$NAMESPACE",  "$SVCNAME.$NAMESPACE.svc.cluster.local", "$SVCNAME.$NAMESPACE", "localhost", "$SCONE_CAS_ADDR", "cas-instance", "host.docker.internal" ]
+
+[dcap]
+subscription_key = "$DCAP_KEY"
+
+[audit_log]
+mode = "signed"
+sink = "$SINK"
+$WEBURL
+EOF
+    fi
+
+    sleep 5
+    check_port_forward "$LOCAL_CAS_CLIENT_PORT"
+    cas_svc_port_forward
+
+    touch "${TARGET_MOUNT_DIR}/identity/config.json" || error_exit "It seems you are not the owner of file '${TARGET_MOUNT_DIR}/identity/config.json' - please change owner of this file"
+
+    docker pull ${SCONECLI_IMAGE} >/dev/null
+    docker run --rm --platform linux/amd64 \
+        --add-host=host.docker.internal:host-gateway --network host\
+        --user $(id -u):$(id -g) \
+        -v "$TARGET_MOUNT_DIR"/identity:/identity \
+        -v "$TARGET_MOUNT_DIR"/owner-config:/owner-config \
+        -e SCONE_CLI_CONFIG="/identity/config.json" \
+        -e CAS_KEY_HASH="$CAS_KEY_HASH" \
+        -e CAS_PROVISIONING_TOKEN="$CAS_PROVISIONING_TOKEN" \
+        -e LOCAL_CAS_CLIENT_PORT="$LOCAL_CAS_CLIENT_PORT" \
+        -e SCONE_CLI_MRENCLAVE="$SCONE_CLI_MRENCLAVE" \
+        -e POLICY_NAME="$POLICY_NAME" \
+        -e SGX_TOLERATIONS="$SGX_TOLERATIONS" \
+        -e SGX_STD_TOLERATIONS="$SGX_STD_TOLERATIONS" \
+        -e SCONE_NO_TIME_THREAD=1 \
+        -e SCONE_PRODUCTION=0 \
+        -e SCONE_MODE="sim" \
+        ${SCONECLI_IMAGE} sh -c 'scone cas provision host.docker.internal:$LOCAL_CAS_CLIENT_PORT -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_TOLERATIONS || scone cas provision host.docker.internal:$LOCAL_CAS_CLIENT_PORT -c $CAS_KEY_HASH --token $CAS_PROVISIONING_TOKEN  --config-file /owner-config/config.toml  with-attestation  $SGX_STD_TOLERATIONS || { echo "Provisioning failed - checking if it is already provisioned!" ; scone session read provisioned 2> /dev/null ; if [ $? != 0 ] ; then  echo "Provisioning of CAS failed! FATAL ERROR: please ensure that you use a CAS that permits DB-Key injection or correct SGX_TOLERATIONS to SGX_STD_TOLERATIONS" ; exit 1 ; else  echo "CAS is already provisioned" ; fi } '
+
+    chmod og-rwx "${TARGET_MOUNT_DIR}/identity/config.json"
+
+    upload_post_provisioning_sessions
+fi
+
+enable_post_provisioning_features
+
+# In case we did recovery, we must put the normal CAS image back
+if [[ $do_recovery == 1 ]] ; then
+    verbose "Checking current .spec.image"
+    actual_cas_image=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath={.spec.image})
+    if [[ "$actual_cas_image" == *"/cas-recovery:$VERSION" ]]; then
+        verbose "Replacing CAS Recovery image by the normal CAS image on .spec.image: $actual_cas_image -> $CAS_IMAGE"
+        kubectl patch cas $NAME -n $NAMESPACE --type json --patch """
+            [
+                {
+                    "op": "replace",
+                    "path": "/spec/image",
+                    "value": "$CAS_IMAGE"
+                },
+            ]"""
+    fi
+fi
+
+exit 0
