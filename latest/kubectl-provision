@@ -26,7 +26,7 @@ Copyright (C) 2022-2025 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="6.0.2"
+export K_PROVISION_VERSION="6.0.3"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -2559,13 +2559,28 @@ then
     warning "Upgrading CAS version $VERSION to version $cas_upgrade_version"
 
     # todo: use a local path for the policy name
-    export POLICY_NAME=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.spec.backup-controller.session}')
-    if [[ "$POLICY_NAME" == "" ]] ; then
-        error_exit "Was not able to find the policy for CAS $NAME in namespace $NAMESPACE. CAS upgrade requires to activate primary/backup first. Is primary/backup really activated for this CAS?"
+    backup_controller_session_spec=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.spec.backup-controller.session}')
+    if [[ "$backup_controller_session_spec" == "" ]] ; then
+        error_exit "Was not able to find the .spec.backup-controller.session for CAS $NAME in namespace $NAMESPACE. CAS upgrade requires to activate primary/backup first. Is primary/backup really activated for this CAS?"
     fi
-    POLICY_NAME=$(echo "$POLICY_NAME" | sed 's/\/register$//')  # removing "/register"
-    verbose "Policy name for CAS $NAME in namespace $NAMESPACE: $POLICY_NAME"
 
+    POLICY_NAME=$(echo "$backup_controller_session_spec" | sed 's/\/register$//')  # removing "/register" if present
+    POLICY_NAME=$(echo "$POLICY_NAME" | sed 's/\/upgrade$//')  # removing "/upgrade" if present
+
+    if [[ "$backup_controller_session_spec" == */register ]]; then
+        updated_backup_controller_session_spec="${backup_controller_session_spec%/register}/upgrade"
+        verbose 'Updating CAS .spec.backup-controller.session, switching from /register to /upgrade'
+        kubectl patch cas $NAME -n $NAMESPACE --type='json' --patch """
+        [
+            {
+                "op": "replace",
+                "path": "/spec/backup-controller/session",
+                "value": $updated_backup_controller_session_spec
+            },
+        ]""" || {
+            error_exit "Unable to update CAS .spec.backup-controller.session from $backup_controller_session_spec to $updated_backup_controller_session_spec"
+        }
+    fi
 
     export OLD_SCONE_CLI_MRENCLAVE="$(docker run --platform linux/amd64 --pull always --rm --entrypoint scone -e SCONE_HASH=1 $BACKUP_CONTROLLER_IMAGE  cas | tr -d '\r')"
 
@@ -2832,24 +2847,26 @@ then
             }
         ]"""  || error_exit "Failed to patch CAS CR. Check spec.image in '$cas_manifest_for_backup_update_new'"
 
-    # Check if number of nodes is less than .spec.safetyService.desiredReplicas.
-    # In this case we disable safety service. If it is not disabled, CAS would never get healthy.
-    verbose "Checking safety service desired number of replicas"
-    safety_service_desired_replicas=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r '.spec.safetyService.desiredReplicas')
-    safety_service_tolerations=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r '.spec.safetyService.tolerations')
-    if [[ "$safety_service_tolerations" == "null" ]]; then
-        safety_service_tolerations="[]"
-    fi
-    disabled_safety_service_during_upgrade=0
-    num_of_safety_service_schedulable_nodes=$(get_schedulable_nodes_considering_tolerations "$safety_service_tolerations")
-    if [[ "$safety_service_desired_replicas" -gt "$num_of_safety_service_schedulable_nodes" ]]; then
-        warning "CAS safety service desired replicas number [$safety_service_desired_replicas] is greater than its schedulable nodes [$num_of_safety_service_schedulable_nodes]"
-        warning "Disabling safety service until we finish upgrade"
-        kubectl patch cas $NAME -n $NAMESPACE --type='json' -p '
-        [
-            { "op": "add", "path": "/spec/safetyService/enabled", "value": false},
-        ]'
-        disabled_safety_service_during_upgrade=1
+    if [[ "$VERSION" =~ ^"5.8" ]]; then
+        # Check if number of nodes is less than .spec.safetyService.desiredReplicas.
+        # In this case we disable safety service. If it is not disabled, CAS would never get healthy.
+        verbose "Checking safety service desired number of replicas"
+        safety_service_desired_replicas=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r '.spec.safetyService.desiredReplicas')
+        safety_service_tolerations=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r '.spec.safetyService.tolerations')
+        if [[ "$safety_service_tolerations" == "null" ]]; then
+            safety_service_tolerations="[]"
+        fi
+        disabled_safety_service_during_upgrade=0
+        num_of_safety_service_schedulable_nodes=$(get_schedulable_nodes_considering_tolerations "$safety_service_tolerations")
+        if [[ "$safety_service_desired_replicas" -gt "$num_of_safety_service_schedulable_nodes" ]]; then
+            warning "CAS safety service desired replicas number [$safety_service_desired_replicas] is greater than its schedulable nodes [$num_of_safety_service_schedulable_nodes]"
+            warning "Disabling safety service until we finish upgrade"
+            kubectl patch cas $NAME -n $NAMESPACE --type='json' -p '
+            [
+                { "op": "add", "path": "/spec/safetyService/enabled", "value": false},
+            ]'
+            disabled_safety_service_during_upgrade=1
+        fi
     fi
 
     new_cas_image_in_pod=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r ".spec.image")
@@ -2896,7 +2913,7 @@ then
     cas_image=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq  ".spec.image")
     verbose "cas_image        (should be new version) $cas_image"
 
-    if [[ $disabled_safety_service_during_upgrade -eq 1 ]]; then
+    if [[ "$VERSION" =~ ^"5.8" && $disabled_safety_service_during_upgrade -eq 1 ]]; then
         warning "Safety service was disabled during upgrade"
         warning "Enabling safety service again"
         kubectl patch cas $NAME -n $NAMESPACE --type='json' -p '
@@ -3194,17 +3211,15 @@ else
     fi
 
     CONFIG_FILE="$TARGET_DIR/owner-config/config.toml"
-    CONFIG_FILE_TEMP="$CONFIG_FILE.template"
     if [[ "$OWNER_FILE" != "" ]] ; then
-        verbose "Downloading owner-config to $CONFIG_FILE_TEMP";
-        download_file "$OWNER_FILE" "$CONFIG_FILE_TEMP"
-        SCONE="\$SCONE" envsubst < "$CONFIG_FILE_TEMP" > "$manifest"
+        verbose "Downloading owner-config from $OWNER_FILE to $CONFIG_FILE";
+        download_file "$OWNER_FILE" "$CONFIG_FILE"
     else 
         cat > "$CONFIG_FILE" <<EOF
 enclave_reconnect_timeout = "24h"
 [api_identity]
 common_name = "$SVCNAME"
-alt_names = ["$POD",  "$POD.$NAMESPACE.svc.cluster.local", "$POD.default",  "$SVCNAME.$NAMESPACE.svc.cluster.local", "$SVCNAME.default", "localhost", "$SCONE_CAS_ADDR", "cas-instance", "host.docker.internal" ]
+alt_names = ["$POD",  "$POD.$NAMESPACE.svc.cluster.local", "$POD.$NAMESPACE",  "$SVCNAME.$NAMESPACE.svc.cluster.local", "$SVCNAME.$NAMESPACE", "localhost", "$SCONE_CAS_ADDR", "cas-instance", "host.docker.internal" ]
 
 [dcap]
 subscription_key = "$DCAP_KEY"

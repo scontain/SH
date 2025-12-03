@@ -37,13 +37,13 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
  - SCRIPTS: by default we pull from  "https://raw.githubusercontent.com/scontain/SH/main/$VERSION" - the scripts are VERSIONed
  - CHART: by default we pull the chart from  "https://raw.githubusercontent.com/scontain/operator/main/" 
     - the charts are VERSIONed: scone-operator-$VERSION.tgz
-    - the images used in the CHART are versioned but we overwrite the image with $REGISTRY/scone.cloud/k8soperators:$VERSION
+    - the images used in the CHART are versioned but we overwrite the image with $IMAGE_REPO/k8soperators:$VERSION
 '
 
 set -e
 
 
-export K_PROVISION_VERSION="6.0.2"
+export K_PROVISION_VERSION="6.0.3"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -1230,8 +1230,8 @@ check_secret "sconeapps" "$NAMESPACE"
 
 # check that the pull secrets give us access to private scone.cloud images 
 # we use an image that is part of namespace "scone.cloud" and which contains command "sleep"
-check_pull_secret sconeapps registry.scontain.com/scone.cloud/sconecli:$VERSION "$NAMESPACE"
-check_pull_secret scone-operator-pull registry.scontain.com/scone.cloud/sconecli:$VERSION "$NAMESPACE"
+check_pull_secret sconeapps $IMAGE_REPO/sconecli:$VERSION "$NAMESPACE"
+check_pull_secret scone-operator-pull $IMAGE_REPO/sconecli:$VERSION "$NAMESPACE"
 
 verbose "Checking SCONE Operator"
 
