@@ -115,6 +115,12 @@ else
     warning "Using external DEFAULT_NAMESPACE=$DEFAULT_NAMESPACE"
 fi
 
+if [[ "$DEFAULT_PCCS_NAMESPACE" == "" ]] ; then
+    DEFAULT_PCCS_NAMESPACE="pccs"
+else
+    warning "Using external DEFAULT_PCCS_NAMESPACE=$DEFAULT_PCCS_NAMESPACE"
+fi
+
 if [[ "$REGISTRY" == "" ]] ; then
     export REGISTRY="registry.scontain.com"
 else
@@ -705,6 +711,7 @@ function check_secret {
 
 function set_urls() {
     export SCONTAIN_OPERATOR_CHART="https://raw.githubusercontent.com/scontain/operator/main/scone-operator-$VERSION.tgz"
+    export INTEL_PCCS_CHART="https://raw.githubusercontent.com/scontain/operator/main/scone-operator-$VERSION.tgz"
     export SCONTAIN_SGXPLUGIN_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/sgxplugin.yaml"
     export SCONTAIN_LAS_MANIFEST="https://raw.githubusercontent.com/scontain/manifests/main/$VERSION/las.yaml"
 
@@ -790,6 +797,8 @@ verify_sign_key_flag="--verify-image-signatures"
 dcap_flag="--dcap-api"
 dcap_short_flag="-d"
 node_selector_flag="--node-selector"
+pccs_flag="--pccs"
+pccs_ns_flag="--pccs-namespace"
 helm_use_configmap="--helm-use-configmap"
 helm_use_secrets="--helm-use-secret"
 helm_secret=false
@@ -798,6 +807,7 @@ helm_confimap=false
 do_auto_detect=1
 
 export NAMESPACE="$DEFAULT_NAMESPACE"
+export PCCS_NAMESPACE="$DEFAULT_PCCS_NAMESPACE"
 
 
 repo="$APP_IMAGE_REPO"
@@ -816,6 +826,7 @@ SECRET_OPERATOR=0
 ONLY_OPERATOR=0
 ONLY_PLUGIN=0
 RUN_SGXPLUGIN=1
+RUN_PCCS=0
 export NODESELECTOR="# nodeSelector:"
 export NODESELECTORKEY="# no node selector specified - SGXPlugin runs on all nodes"
 
@@ -906,12 +917,22 @@ function usage () {
   echo "                  Configure helm to use Kubernetes secrets to store its state."
   echo "                  This option is mutually exclusive with $helm_use_configmap."
   echo "                  NOTE: Once the SCONE operator exists, the resource kind used cannot be changed."
+  echo "    $pccs_flag"
+  echo "                  Use the PCCS service for SGX DCAP quote verification collateral."
+  echo "                  This enables retrieval of TCB information and QE identity from PCCS."
+  echo "                  Useful for environments without direct access to Intel PCS."
+  echo "    $pccs_ns_flag PCCS_NAMESPACE"
+  echo "                  The Kubernetes namespace in which the PCCS should be deployed on the cluster."
+  echo "                  NOTE: This flag is only effective when '$pccs_flag' is also set."
+  echo "                  Default value: \"$DEFAULT_PCCS_NAMESPACE\""
   echo "    $help_flag"
   echo "                  Output this usage information and exit."
   echo ""
   echo "Default Configuration: "
   echo "  - CERT_MANAGER=$CERT_MANAGER"
   echo "  - DEFAULT_NAMESPACE=$DEFAULT_NAMESPACE"
+  echo "  - DEFAULT_PCCS_NAMESPACE=$DEFAULT_PCCS_NAMESPACE"
+    echo "  - HELM_CHART=$HELM_CHART"
   echo "  - HELM_CHART=$HELM_CHART"
   echo "  - HELM_DRIVER=$HELM_DRIVER"
   echo "  - LAS_MANIFEST=$LAS_MANIFEST"
@@ -1073,6 +1094,19 @@ while [[ "$#" -gt 0 ]]; do
       if [ ! -e "${cosign_public_key_file}" ]; then
         usage
         error_exit "Error: Please specify a valid public key file for image signature verfication ('$cosign_public_key_file' does not exist)."
+      fi
+      shift # past argument
+      shift || true # past value
+      ;;
+    ${pccs_flag})
+      RUN_PCCS=1
+      shift # past argument
+      ;;
+    ${pccs_ns_flag})
+      export PCCS_NAMESPACE="$2"
+      if [ ! -n "${PCCS_NAMESPACE}" ]; then
+        usage
+        error_exit "Error: The PCCS namespace '$PCCS_NAMESPACE' is invalid."
       fi
       shift # past argument
       shift || true # past value
@@ -1348,6 +1382,34 @@ if [[ $ONLY_OPERATOR == 1 ]] ; then
     exit 0
 fi
 
+verbose "Checking PCCS"
+
+if [[ $RUN_PCCS == 1 ]] ; then
+
+    if ! kubectl get statefulset pccs -n $PCCS_NAMESPACE > /dev/null 2>/dev/null
+    then
+        warning "StatefulSet 'pccs' does not exist in namespace '$PCCS_NAMESPACE'."
+        if [[ $FIX == 1 ]] ; then
+            verbose "  Fixing by creating StatefulSet 'pccs' in namespace '$PCCS_NAMESPACE'."
+            download_file "$PCCS_HELM_CHART" "pccs.tgz"
+
+            if [[ "$PCCS_HELM_CHART" == "$PCCS_CHART" || "$cosign_public_key_file" != "" ]]; then
+                verify_image "pccs" "$VERSION"
+            else
+                warning "Skipping verification of signature of pccs image, due to unknown origin of PCCS_HELM_CHART=$PCCS_HELM_CHART"
+            fi
+
+            tar -xzf pccs.tgz
+            rm pccs.tgz
+            exit 0
+            helm upgrade --install pccs ./pccs --namespace $PCCS_NAMESPACE --version $VERSION  --set image=$PULL_IMAGE --set pccsConfig.apiKey=$DCAP_KEY
+        fi
+    else
+        verbose "  StatefulSet 'pccs' already exists in namespace '$PCCS_NAMESPACE'."
+    fi
+else
+    verbose "Skipping installation of PCCS"
+fi
 
 verbose "Checking SGXPlugin"
 
