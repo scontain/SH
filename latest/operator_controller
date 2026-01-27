@@ -43,7 +43,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 set -e
 
 
-export K_PROVISION_VERSION="6.0.4"
+export K_PROVISION_VERSION="6.0.5"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
