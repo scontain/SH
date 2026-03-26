@@ -26,7 +26,7 @@ Copyright (C) 2022-2025 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="6.0.5"
+export K_PROVISION_VERSION="6.0.6"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -678,14 +678,24 @@ function check_prerequisites() {
         exit_msg="${exit_msg}No access to Kubernetes cluster! "
     fi
 
-    verbose "Checking that you have access to cosign."
-    if ! cosign version &> /dev/null
+    if [ $do_docker == 1 ]
     then
-        echo -e "${RED}It seems that you do not have access to cosign!${NC}"
-        echo -e "- ${ORANGE}Please install 'cosign'- see https://docs.sigstore.dev/cosign/installation/${NC}"
-        exit_msg="${exit_msg}No access to cosign! "
-    fi
+        verbose "Checking that you have access to docker."
+        if ! docker --version &> /dev/null
+        then
+            echo -e "${RED}It seems that you do not have access to docker!${NC}"
+            echo -e "- ${ORANGE}Please install 'docker'- see https://docs.docker.com/get-started/get-docker/${NC}"
+            exit_msg="${exit_msg}No access to docker! "
+        fi
 
+        verbose "Checking that you have access to cosign."
+        if ! cosign version &> /dev/null
+        then
+            echo -e "${RED}It seems that you do not have access to cosign!${NC}"
+            echo -e "- ${ORANGE}Please install 'cosign'- see https://docs.sigstore.dev/cosign/installation/${NC}"
+            exit_msg="${exit_msg}No access to cosign! "
+        fi
+    fi
 
     verbose "Checking that you have access to gpg."
     if ! gpg --version &> /dev/null
@@ -2683,7 +2693,7 @@ then
     verbose "  - You can modify the metadata and spec fields of the manifest and apply the changes with 'kubectl apply -f \"$cas_manifest_for_backup_update_new\""
 
     new_backup_controller_name=$(get_backup_controller_pod_name "$NAME" "$NAMESPACE")
-    while [[ "$new_backup_controller_pods" == "$old_backup_controller_name" ]]; do
+    while [[ "$new_backup_controller_name" == "$old_backup_controller_name" ]]; do
         sleep 1
         new_backup_controller_name=$(get_backup_controller_pod_name "$NAME" "$NAMESPACE")
         verbose "Waiting for the backup controller pod to change name - bacause image changed, pod will be replaced"
@@ -2899,6 +2909,7 @@ then
     unset max_attempts
 
     verbose "Waiting CAS to be in HEALTHY state"
+    STATE=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.state}')
     while [[ "$STATE" != "HEALTHY"  ]] ; do
         sleep 1
         STATE=$(kubectl get cas $NAME -n $NAMESPACE -o jsonpath='{.status.state}')
