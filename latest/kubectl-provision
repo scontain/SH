@@ -26,7 +26,7 @@ Copyright (C) 2022-2025 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="6.0.7"
+export K_PROVISION_VERSION="6.0.8"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -1806,14 +1806,30 @@ function set_defaults() {
     fi
 
     if [[ "$DCAP_KEY" == "" ]] ; then
-        # try to extract existing DCAP_KEY from the LAS
-        EXISTING_DCAP_KEY=$(kubectl get las las -o json | jq -r '.spec.dcapKey' )
+        verbose "Trying to extract existing DCAP_KEY from the LAS"
 
-        if [[ "$EXISTING_DCAP_KEY" == "null" ]] ; then
+        local _err_file
+        _err_file=$(mktemp)
+
+        local existing_dcap_key=""
+        local _las_json=""
+        local _rc=0
+        _las_json=$(timeout 5s kubectl get las las -o json 2>"$_err_file") || _rc=$?
+
+        if [[ $_rc -eq 124 ]]; then
+            warning "Timed out after 5s trying to contact the Kubernetes cluster"
+        elif [[ $_rc -ne 0 || -z "$_las_json" ]]; then
+            warning "Failed to retrieve LAS from the Kubernetes cluster (exit code: $_rc): stderr: '$(<"$_err_file")'"
+        else
+            existing_dcap_key=$(jq -r '.spec.dcapKey' <<< "$_las_json" 2>/dev/null) || true
+        fi
+        rm -f "$_err_file"
+
+        if [[ "$existing_dcap_key" == "null" || "$existing_dcap_key" == "" ]] ; then
             warning "No DCAP API Key specified and extraction of dcapKey from LAS failed - using default DCAP_KEY=$DEFAULT_DCAP_KEY - not recommended."
             export DCAP_KEY=$DEFAULT_DCAP_KEY  # Default DCAP API Key to used
         else
-            DCAP_KEY="$EXISTING_DCAP_KEY"
+            DCAP_KEY="$existing_dcap_key"
             warning "No DCAP API Key specified using dcapKey extracted from LAS - not recommended."
         fi
     else

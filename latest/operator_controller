@@ -43,7 +43,7 @@ this script or by providing a config file $CONFIG_FILE (default is "operator_con
 set -e
 
 
-export K_PROVISION_VERSION="6.0.7"
+export K_PROVISION_VERSION="6.0.8"
 export RED='\e[31m'
 export BLUE='\e[34m'
 export ORANGE='\e[33m'
@@ -103,7 +103,7 @@ if [[ $VERSION =~ ^"5." ]]; then
 fi
 
 if [[ "$CERT_MANAGER" == "" ]] ; then
-    CERT_MANAGER_VERSION=$(curl -s https://api.github.com/repos/cert-manager/cert-manager/releases/latest | jq -r '.tag_name')
+    CERT_MANAGER_VERSION=v1.20.2
     CERT_MANAGER="https://github.com/cert-manager/cert-manager/releases/download/$CERT_MANAGER_VERSION/cert-manager.yaml"
 else
     warning "Using external CERT_MANAGER=$CERT_MANAGER"
@@ -1243,7 +1243,7 @@ INSTALLED_VERSION=$(helm list -o json --all-namespaces | jq -r '.[] | select(.ch
 verbose "Installed version of the operator controller is '$INSTALLED_VERSION' and the desired version is '$VERSION'"
 if [[ $UPDATE == 1 ]] ; then
   if [[ "$INSTALLED_VERSION" != "$VERSION" || "$INSTALLED_STATUS" == "failed" ]] ; then
-    verbose "  Updating the SCONE Operator: helm upgrade --install scone-operator $HELM_CHART --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE"
+    verbose "  Updating the SCONE Operator: helm upgrade --install scone-operator $HELM_CHART --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE"
 
     download_file "$HELM_CHART" "scone-operator.tgz"
 
@@ -1255,10 +1255,10 @@ if [[ $UPDATE == 1 ]] ; then
 
     tar -xzf scone-operator.tgz
     rm scone-operator.tgz
-    helm upgrade --install scone-operator ./scone-operator --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE --set helmDriver=$HELM_DRIVER  || {
+    helm upgrade --install scone-operator ./scone-operator --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE --set helmDriver=$HELM_DRIVER  || {
         verbose "let's try to fix this by first deleting the existing deployment of the scone-controller-manager"
         kubectl delete deployment  -n $NAMESPACE scone-controller-manager
-        helm upgrade --install scone-operator ./scone-operator --force --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE  --set helmDriver=$HELM_DRIVER
+        helm upgrade --install scone-operator ./scone-operator --namespace $NAMESPACE  --version $VERSION --set image=$PULL_IMAGE  --set helmDriver=$HELM_DRIVER
     }
     export INSTALLED_VERSION="$VERSION"
     verbose "Waiting for controller to start up ... 30 seconds"
