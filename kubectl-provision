@@ -26,7 +26,7 @@ Copyright (C) 2022-2025 scontain.com
 
 set -e
 
-export K_PROVISION_VERSION="6.0.8"
+export K_PROVISION_VERSION="6.0.9"
 export K_SGX_TOLERATIONS="--accept-configuration-needed --accept-group-out-of-date --accept-sw-hardening-needed"
 export K_MRSIGNER_DB="195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d"
 export K_MRSIGNER_SCONTAIN="b6c14ae06a05284253b548038e269f8225718bc0856828f491ed85174ccc2979"
@@ -1944,6 +1944,24 @@ check_tolerations() {
     ' <<< '{}'
 }
 
+# check_cas_tolerations_consistency extracts .spec.tolerations and .spec."backup-controller".tolerations
+# from the given CAS JSON into cas_tolerations and cas_bc_tolerations. Arrays are sorted (by all fields, so
+# tolerations sharing a key are ordered too) so we can compare them afterwards.
+# A field that is not set (null) is treated as an empty array: both fields are independent (the
+# backup-controller does not inherit the CAS tolerations), the API server prunes explicit nulls, and
+# the operator renders nil and [] identically (only the unschedulable toleration, which it always adds).
+# Values that are not arrays are not normalized and are reported as an extraction failure.
+# Returns 0 if both are equal, 1 if they differ and 2 if they cannot be extracted.
+check_cas_tolerations_consistency() {
+    local cas_json="$1"
+    local normalize_tolerations='if . == null then [] elif type == "array" then sort else error("tolerations must be an array, got \(type)") end'
+
+    cas_tolerations=$(printf '%s\n' "$cas_json" | jq ".spec.tolerations | $normalize_tolerations") || return 2
+    cas_bc_tolerations=$(printf '%s\n' "$cas_json" | jq ".spec.\"backup-controller\".tolerations | $normalize_tolerations") || return 2
+
+    [[ "$cas_tolerations" == "$cas_bc_tolerations" ]] || return 1
+}
+
 function get_schedulable_nodes_considering_tolerations {
     local tolerations="$1"
 
@@ -2509,16 +2527,13 @@ then
     JSON=$(kubectl get cas "$NAME" --namespace "$NAMESPACE" -o json 2>/dev/null) || error_exit "Cannot find CAS $NAME in namespace $NAMESPACE. Exiting!"
 
     # We can only safetly upgrade to new version when .spec.tolerations is equals to .spec.backup-controller.tolerations
-    # to ensure we can register the all nodes that CAS pod can move to. We sort by key to we can compare afterwords.
-    cas_tolerations=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r '.spec.tolerations')
-    cas_bc_tolerations=$(kubectl get cas $NAME -n $NAMESPACE -o json | jq -r '.spec."backup-controller".tolerations')
-    if [[ "$cas_tolerations" != "null" ]]; then
-        cas_tolerations=$(echo $cas_tolerations | jq '.spec.tolerations | sort_by(.key)')
+    # to ensure we can register the all nodes that CAS pod can move to.
+    tolerations_check_rc=0
+    check_cas_tolerations_consistency "$JSON" || tolerations_check_rc=$?
+    if [[ $tolerations_check_rc -eq 2 ]]; then
+        error_exit "Unable to read tolerations of CAS $NAME in namespace $NAMESPACE (.spec.tolerations and .spec.backup-controller.tolerations)"
     fi
-    if [[ "$cas_bc_tolerations" != "null" ]]; then
-        cas_bc_tolerations=$(echo $cas_bc_tolerations | jq '.spec."backup-controller".tolerations | sort_by(.key)')
-    fi
-    if [[ "$cas_tolerations" != "$cas_bc_tolerations" ]]; then
+    if [[ $tolerations_check_rc -ne 0 ]]; then
         warning "CAS tolerations and its backup-controller tolerations differ (.spec.tolerations and .spec.backup-controller.tolerations)"
         warning "Current .spec.tolerations:"
         warning "$cas_tolerations"
